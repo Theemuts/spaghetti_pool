@@ -103,7 +103,7 @@ defmodule SpaghettiPool do
 
   def init([], _worker_args, %{size: size, supervisor: sup} = state_data) do
     workers = prepopulate(size, sup)
-    {:next_state, :all_workers_available, %{state_data | workers: workers}}
+    {:ok, :all_workers_available, %{state_data | workers: workers}}
   end
 
   ### Handle reads

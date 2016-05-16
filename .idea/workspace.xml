@@ -2,8 +2,8 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="9c5fe6ca-1446-476f-8374-1578f10a8996" name="Default" comment="">
-      <change type="NEW" beforePath="" afterPath="$PROJECT_DIR$/poolboy_licence/LICENCE" />
       <change type="MODIFICATION" beforePath="$PROJECT_DIR$/.idea/workspace.xml" afterPath="$PROJECT_DIR$/.idea/workspace.xml" />
+      <change type="MODIFICATION" beforePath="$PROJECT_DIR$/lib/spaghetti_pool.ex" afterPath="$PROJECT_DIR$/lib/spaghetti_pool.ex" />
     </list>
     <ignored path="spaghetti_pool.iws" />
     <ignored path=".idea/workspace.xml" />
@@ -25,25 +25,15 @@
   </component>
   <component name="FileEditorManager">
     <leaf SIDE_TABS_SIZE_LIMIT_KEY="300">
-      <file leaf-file-name="spaghetti_pool.ex" pinned="false" current-in-tab="false">
+      <file leaf-file-name="spaghetti_pool.ex" pinned="false" current-in-tab="true">
         <entry file="file://$PROJECT_DIR$/lib/spaghetti_pool.ex">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="453">
-              <caret line="382" column="35" selection-start-line="382" selection-start-column="35" selection-end-line="382" selection-end-column="35" />
+            <state relative-caret-position="391">
+              <caret line="105" column="8" selection-start-line="105" selection-start-column="8" selection-end-line="105" selection-end-column="8" />
               <folding>
                 <element signature="e#141#149#0" expanded="true" />
                 <element signature="e#614#622#0" expanded="true" />
               </folding>
-            </state>
-          </provider>
-        </entry>
-      </file>
-      <file leaf-file-name="LICENCE" pinned="false" current-in-tab="true">
-        <entry file="file://$PROJECT_DIR$/poolboy_licence/LICENCE">
-          <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="162">
-              <caret line="9" column="55" selection-start-line="9" selection-start-column="55" selection-end-line="9" selection-end-column="55" />
-              <folding />
             </state>
           </provider>
         </entry>
@@ -91,11 +81,11 @@
         <option value="$PROJECT_DIR$/lib/spagghetti_pool/request_fsm.ex" />
         <option value="$PROJECT_DIR$/lib/spaghetti_pool/fsm.ex" />
         <option value="$PROJECT_DIR$/lib/spaghetti_pool/request_fsm.ex" />
-        <option value="$PROJECT_DIR$/lib/spaghetti_pool.ex" />
         <option value="$PROJECT_DIR$/lib/spaghetti_pool/spaghetti_pool_supervisor.ex" />
         <option value="$PROJECT_DIR$/mix.exs" />
         <option value="$PROJECT_DIR$/lib/spaghetti_pool/app.ex" />
         <option value="$PROJECT_DIR$/poolboy_licence/LICENCE" />
+        <option value="$PROJECT_DIR$/lib/spaghetti_pool.ex" />
       </list>
     </option>
   </component>
@@ -168,6 +158,9 @@
         </subPane>
       </pane>
     </panes>
+  </component>
+  <component name="PropertiesComponent">
+    <property name="last_opened_file_path" value="$PROJECT_DIR$/../spaghetti_cache" />
   </component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
@@ -547,22 +540,22 @@
         </state>
       </provider>
     </entry>
-    <entry file="file://$PROJECT_DIR$/lib/spaghetti_pool.ex">
-      <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="453">
-          <caret line="382" column="35" selection-start-line="382" selection-start-column="35" selection-end-line="382" selection-end-column="35" />
-          <folding>
-            <element signature="e#141#149#0" expanded="true" />
-            <element signature="e#614#622#0" expanded="true" />
-          </folding>
-        </state>
-      </provider>
-    </entry>
     <entry file="file://$PROJECT_DIR$/poolboy_licence/LICENCE">
       <provider selected="true" editor-type-id="text-editor">
         <state relative-caret-position="162">
           <caret line="9" column="55" selection-start-line="9" selection-start-column="55" selection-end-line="9" selection-end-column="55" />
           <folding />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/lib/spaghetti_pool.ex">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="391">
+          <caret line="105" column="8" selection-start-line="105" selection-start-column="8" selection-end-line="105" selection-end-column="8" />
+          <folding>
+            <element signature="e#141#149#0" expanded="true" />
+            <element signature="e#614#622#0" expanded="true" />
+          </folding>
         </state>
       </provider>
     </entry>
