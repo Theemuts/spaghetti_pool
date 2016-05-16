@@ -65,7 +65,7 @@ defmodule SpaghettiPool do
                    workers: [],
                    current_write: MapSet.new,
                    pending_write: %{},
-                   processing_queue: nil,
+                   processing_queue: :queue.new,
                    read_queue: :queue.new,
                    write_queue: :queue.new,
                    monitors: mons,
@@ -159,7 +159,8 @@ defmodule SpaghettiPool do
   end
 
   def handle_event({:checkin_worker, _, _} = e, :await_readers, %{supervisor: sup, processing_queue: q} = sd) do
-    %{workers: w} = sd = handle_checkin(e, sd)
+    x = handle_checkin(e, sd)
+    {nil, %{workers: w} = sd} = x
 
     if :queue.is_empty(q) do
       n_workers = sup |> Supervisor.which_children |> length
@@ -194,13 +195,13 @@ defmodule SpaghettiPool do
   # Always put in queue, unless state is :all_workers_available
   def handle_sync_event({:request_worker, _, :read} = e, from, :all_workers_available, sd) do
     {pid, sd} = handle_checkout(e, from, sd)
-    :gen_fm.reply(from, pid)
+    :gen_fsm.reply(from, pid)
     handle_reads(:handle_next, sd)
   end
 
   def handle_sync_event({:request_worker, _, {:write, _}} = e, from, :all_workers_available, sd) do
     {pid, sd} = handle_checkout(e, from, sd)
-    :gen_fm.reply(from, pid)
+    :gen_fsm.reply(from, pid)
     handle_writes(:handle_next, sd)
   end
 
@@ -304,7 +305,7 @@ defmodule SpaghettiPool do
     prepopulate(n-1, sup, [new_worker(sup) | workers])
   end
 
-  defp handle_checkin({:checkin, pid, :read}, %{monitors: mons, workers: w} = sd) do
+  defp handle_checkin({:checkin_worker, pid, :read}, %{monitors: mons, workers: w} = sd) do
     case :ets.lookup(mons, pid) do
       [{^pid, _, m_ref, nil}] ->
         true = Process.demonitor(m_ref)
@@ -315,7 +316,7 @@ defmodule SpaghettiPool do
     end
   end
 
-  defp handle_checkin({:checkin, pid, {:write, key}}, %{monitors: mons, workers: w} = sd) do
+  defp handle_checkin({:checkin_worker, pid, {:write, key}}, %{monitors: mons, workers: w} = sd) do
     case :ets.lookup(mons, pid) do
       [{^pid, _, m_ref, ^key}] ->
         true = Process.demonitor(m_ref)
