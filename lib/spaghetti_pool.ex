@@ -69,10 +69,10 @@ defmodule SpaghettiPool do
                    read_queue: :queue.new,
                    write_queue: :queue.new,
                    monitors: mons,
-                   size: 5,
+                   size: 10,
                    overflow: 0,
                    max_overflow: 10,
-                   strategy: :fifo}
+                   strategy: Keyword.get(pool_args, :max_overflow, :fifo)}
     init(pool_args, worker_args, state_data)
   end
 
@@ -112,9 +112,9 @@ defmodule SpaghettiPool do
       when length(w) > 0 or (mo > 0 and mo > o) do
     case :queue.out(queue) do
       {:empty, ^queue} ->
-        {:next_state, :await_readers, sd}
-      {{from, c_ref, _}, queue} ->
-        {pid, sd} = handle_checkout({:request_worker, c_ref, :read, false}, from, sd)
+        transition(:handle_reads, sd)
+      {{:value, {from, c_ref, _}}, queue} ->
+        {pid, sd} = handle_checkout({:request_worker, c_ref, :read}, from, sd)
         :gen_fsm.reply(from, pid)
         handle_reads(:handle_next, %{sd | processing_queue: queue})
     end
@@ -130,8 +130,8 @@ defmodule SpaghettiPool do
       when length(w) > 0 or (mo > 0 and mo > o) do
     case :queue.out(queue) do
       {:empty, ^queue} ->
-        {:next_state, :await_writers, sd}
-      {{from, c_ref, _, key} = v, queue} ->
+        transition(:handle_writes, sd)
+      {{:value, {from, c_ref, _, key} = v}, queue} ->
         if MapSet.member?(cw, key) do
           add_to_pending_write(v, from, sd)
         else
@@ -142,11 +142,11 @@ defmodule SpaghettiPool do
     end
   end
 
-  def handle_writes({:handle_pending, key}, %{workers: [pid|_], pending_write: pw, current_write: cw, overflow: o, max_overflow: mo} = sd) do
+  def handle_writes({:handle_pending, key}, %{workers: [pid|_], pending_write: pw} = sd) do
     case :queue.out(pw[key]) do
       {:empty, _} ->
         handle_writes(:handle_next, %{sd | pending_write: Map.delete(pw, key)})
-      {{from, c_ref, _, key} = v, queue} ->
+      {{:value, {from, c_ref, _, key}}, queue} ->
         {pid, sd} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, sd)
         :gen_fsm.reply(from, pid)
         handle_reads(:handle_next, %{sd | pending_write: %{pw | key => queue}})
@@ -159,14 +159,14 @@ defmodule SpaghettiPool do
 
   ### Checkin workers
 
-  def handle_event({:checkin_worker, _, _} = e, :handling_reads, sd) do
-    sd = handle_checkin(e, sd)
-    {:next_state, :handling_reads, sd}
+  def handle_event({:checkin_worker, _, _} = e, :handle_reads, sd) do
+    {_, sd} = handle_checkin(e, sd)
+    handle_reads(:handle_next, sd)
   end
 
-  def handle_event({:checkin_worker, _, _} = e, :handling_writes, sd) do
-    sd = handle_checkin(e, sd)
-    {:next_state, :handling_writes, sd}
+  def handle_event({:checkin_worker, _, _} = e, :handle_writes, sd) do
+    {_, sd} = handle_checkin(e, sd)
+    handle_writes(:handle_next, sd)
   end
 
   def handle_event({:checkin_worker, _, _} = e, :await_readers, %{processing_queue: q, write_queue: wq} = sd) do
@@ -199,8 +199,6 @@ defmodule SpaghettiPool do
     end
   end
 
-  # Checkout Worker Request is a sync_send_all_state_event-op
-  # Always put in queue, unless state is :all_workers_available
   def handle_sync_event({:request_worker, _, :read} = e, from, :all_workers_available, sd) do
     {pid, sd} = handle_checkout(e, from, sd)
     :gen_fsm.reply(from, pid)
@@ -223,9 +221,6 @@ defmodule SpaghettiPool do
     transition(state_name, sd)
   end
 
-  # Calling process went down
-  # Check if it exist in monitors table
-  # TODO: Should this unlock the field?
   def handle_info({:"DOWN", mon_ref, _, _, _}, state_name, %{monitors: mons, processing_queue: w} = state_data) do
     case :ets.match(mons, {'$1', '_', mon_ref, '$2'}) do
       [[pid, nil]] ->
@@ -242,9 +237,6 @@ defmodule SpaghettiPool do
     end
   end
 
-
-
-  # Worker exit
   def handle_info({:"EXIT", pid, _reason}, state_name, %{supervisor: sup, monitors: mons, workers: workers} = state_data) do
     case :ets.lookup(mons, pid) do
       [{^pid, _, mon_ref, key}] ->
@@ -261,11 +253,6 @@ defmodule SpaghettiPool do
         end
     end
   end
-
-  ## Do nothing?
-  #def handle_info(_info, state_name, state_data) do
-  #  {:next_state, state_name, state_data}
-  #end
 
   def terminate(_reason, _state_name, %{workers: workers, supervisor: sup}) do
     :ok = Enum.each(workers, fn(w) -> Process.unlink(w) end)
@@ -333,6 +320,10 @@ defmodule SpaghettiPool do
         handle_reads(:handle_next, %{sd | processing_queue: rq, read_queue: :queue.new})
       :await_writers when all_available ->
         handle_writes(:handle_next, sd)
+      :handle_reads when all_available and fully_processed ->
+        handle_writes(:handle_next, %{sd | processing_queue: wq, write_queue: :queue.new})
+      :handle_writes when all_available and fully_processed ->
+        handle_reads(:handle_next, %{sd | processing_queue: rq, read_queue: :queue.new})
       _ ->
         {:next_state, state_name, sd}
     end
@@ -406,7 +397,7 @@ defmodule SpaghettiPool do
     |> update_current_write
   end
 
-  def add_to_monitors_table(pid, c_ref, m_ref, %{monitors: mons, overflow: o, workers: w, current_write: cw} = sd, key \\ nil) do
+  def add_to_monitors_table(pid, c_ref, m_ref, %{monitors: mons, overflow: o, workers: w} = sd, key \\ nil) do
     true = :ets.insert(mons, {pid, c_ref, m_ref, key})
     case w do
       [] -> {pid, %{sd | overflow: o + 1}}
@@ -440,7 +431,7 @@ defmodule SpaghettiPool do
     end
   end
 
-  defp handle_next_write(pid, %{current_write: cw, supervisor: sup, monitors: mons, overflow: o, pending_write: pw, processing_queue: q, workers: w} = sd, key) do
+  defp handle_next_write(pid, %{current_write: cw, supervisor: sup, monitors: mons, overflow: o, processing_queue: q, workers: w} = sd, key) do
     cw = MapSet.delete(cw, key)
 
     case :queue.out(q) do
@@ -457,17 +448,18 @@ defmodule SpaghettiPool do
     end
   end
 
-  defp handle_pending_write(pw_queue, pid, %{current_write: cw, supervisor: sup, monitors: mons, overflow: o, pending_write: pw, processing_queue: q, workers: w} = sd, key) do
+  defp handle_pending_write(pw_queue, pid, %{supervisor: sup, monitors: mons, overflow: o, pending_write: pw, workers: w} = sd, key) do
     case :queue.out(pw_queue) do
       {{:value, {from, c_ref, m_ref, key}}, waiting} ->
         new_worker = new_worker(sup)
         true = :ets.insert(mons, {new_worker, c_ref, m_ref, key})
         :gen_fsm.reply(from, new_worker)
         %{sd | pending_write: %{pw | key => waiting}}
-      {:empty, empty} when o > 0 ->
-        handle_next_write(pid, %{sd | overflow: o - 1, processing_queue: empty}, key)
-      {:empty, empty} ->
-        handle_next_write(pid, sd, key)
+      {:empty, _} when o > 0 ->
+        handle_next_write(pid, %{sd | overflow: o - 1, pending_write: Map.delete(pw, key)}, key)
+      {:empty, _} ->
+        w = [new_worker(sup) | Enum.filter(w, fn (p) -> p != pid end)]
+        handle_next_write(pid, %{sd | workers: w, pending_write: Map.delete(pw, key)}, key)
     end
   end
 
@@ -477,7 +469,7 @@ defmodule SpaghettiPool do
     n_avail == n_workers
   end
 
-  defp pending_writes?(%{pending_writes: pw}, key) do
+  defp pending_writes?(%{pending_write: pw}, key) do
     case pw[key] do
       nil -> false
       _ -> true
