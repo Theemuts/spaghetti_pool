@@ -111,7 +111,8 @@ defmodule SpaghettiPool do
   def handle_reads(:handle_next, %{workers: w, processing_queue: queue, overflow: o, max_overflow: mo} = sd)
       when length(w) > 0 or (mo > 0 and mo > o) do
     case :queue.out(queue) do
-      {:empty, ^queue} -> {:next_state, :await_readers, sd}
+      {:empty, ^queue} ->
+        {:next_state, :await_readers, sd}
       {{from, c_ref, _}, queue} ->
         {pid, sd} = handle_checkout({:request_worker, c_ref, :read, false}, from, sd)
         :gen_fsm.reply(from, pid)
@@ -158,36 +159,31 @@ defmodule SpaghettiPool do
     {:next_state, :handling_writes, sd}
   end
 
-  def handle_event({:checkin_worker, _, _} = e, :await_readers, %{supervisor: sup, processing_queue: q} = sd) do
-    x = handle_checkin(e, sd)
-    {nil, %{workers: w} = sd} = x
+  def handle_event({:checkin_worker, _, _} = e, :await_readers, %{processing_queue: q, write_queue: wq} = sd) do
+    {nil, sd} = handle_checkin(e, sd)
+    empty_processing = :queue.is_empty(q)
+    all_available = all_workers_available?(sd)
+    empty_write = :queue.is_empty(wq)
 
-    if :queue.is_empty(q) do
-      n_workers = sup |> Supervisor.which_children |> length
-      n_avail = length(w)
-      if n_avail == n_workers do
-        handle_writes(:handle_next, %{sd | processing_queue: sd.write_queue, write_queue: :queue.new})
-      else
-        {:next_state, :await_readers, sd}
-      end
-    else
-      handle_reads(:handle_next, sd)
+    cond do
+      empty_processing and all_available and empty_write -> {:next_state, :all_workers_available, sd}
+      empty_processing and all_available -> handle_writes(:handle_next, %{sd | processing_queue: wq, write_queue: :queue.new})
+      empty_processing -> {:next_state, :await_readers, sd}
+      true -> handle_reads(:handle_next, sd)
     end
   end
 
-  def handle_event({:checkin_worker, _, _} = e, :await_writers, %{supervisor: sup, processing_queue: q} = sd) do
-    %{workers: w} = sd = handle_checkin(e, sd)
+  def handle_event({:checkin_worker, _, _} = e, :await_writers, %{processing_queue: q, read_queue: rq} = sd) do
+    {_key, sd} = handle_checkin(e, sd)
+    empty_processing = :queue.is_empty(q)
+    all_available = all_workers_available?(sd)
+    empty_read = :queue.is_empty(rq)
 
-    if :queue.is_empty(q) do
-      n_workers = sup |> Supervisor.which_children |> length
-      n_avail = length(w)
-      if n_avail == n_workers do
-        handle_reads(:handle_next, %{sd | processing_queue: sd.read_queue, read_queue: :queue.new})
-      else
-        {:next_state, :await_writers, sd}
-      end
-    else
-      handle_writes(:handle_next, sd)
+    cond do
+      empty_processing and all_available and empty_read -> {:next_state, :all_workers_available, sd}
+      empty_processing and all_available -> handle_reads(:handle_next, %{sd | processing_queue: rq, read_queue: :queue.new})
+      empty_processing -> {:next_state, :await_writers, sd}
+      true -> handle_writes(:handle_next, sd)
     end
   end
 
@@ -205,9 +201,22 @@ defmodule SpaghettiPool do
     handle_writes(:handle_next, sd)
   end
 
-  def handle_sync_event({:request_worker, _, :read} = e, from, state_name, sd) do
+  def handle_sync_event({:request_worker, _, :read} = e, from, state_name, %{processing_queue: q} = sd) do
     sd = add_to_read_queue(e, from, sd)
-    {:next_state, state_name, sd}
+    all_available = all_workers_available?(sd)
+    handle_next = :queue.len(q) != 0
+
+    case state_name do
+      :await_readers when all_available and handle_next ->
+        handle_reads(:handle_next, sd)
+      :await_readers when all_available ->
+        handle_writes(:handle_next, sd)
+      :await_writes when all_available and handle_next ->
+        handle_writes(:handle_next, sd)
+      :await_writers when all_available ->
+        handle_reads(:handle_next, sd)
+      _ -> {:next_state, state_name, sd}
+    end
   end
 
   def handle_sync_event({:request_worker, _, {:write, _}} = e, from, state_name, sd) do
@@ -220,11 +229,11 @@ defmodule SpaghettiPool do
     case :ets.match(mons, {'$1', '_', mon_ref, '$2'}) do
       [[pid, nil]] ->
         true = :ets.delete(mons, pid)
-        state_data = handle_checkin({:checkin, pid, :read}, state_data)
+        state_data = handle_checkin({:checkin_worker, pid, :read}, state_data)
         {:next_state, state_name, state_data}
       [[pid, key]] ->
         true = :ets.delete(mons, pid)
-        state_data = handle_checkin({:checkin, pid, {:write, key}}, state_data)
+        state_data = handle_checkin({:checkin_worker, pid, {:write, key}}, state_data)
         {:next_state, state_name, state_data}
       [] ->
         w = :queue.filter(fn({_, _, r}) -> r != mon_ref end, w)
@@ -238,7 +247,7 @@ defmodule SpaghettiPool do
       [{pid, _, mon_ref}] ->
         true = Process.demonitor(mon_ref)
         true = :ets.delete(mons, pid)
-        state_data = handle_worker_exit(pid, state_data) #TODO
+        state_data = handle_worker_exit(pid, state_data)
         {:next_state, state_name, state_data}
       [] ->
         if Enum.member?(workers, pid) do
@@ -327,13 +336,16 @@ defmodule SpaghettiPool do
     end
   end
 
-  defp add_to_read_queue({:request_worker, c_ref, :read, _}, {from_pid, _} = from, %{read_queue: rq} = sd) do
+  defp add_to_read_queue(a, b, c) do
+    {:request_worker, c_ref, :read} = a
+    from = {from_pid, _} = b
+    sd = %{read_queue: rq} = c
     m_ref = Process.monitor(from_pid)
     rq = :queue.in({from, c_ref, m_ref}, rq)
     %{sd | read_queue: rq}
   end
 
-  defp add_to_write_queue({:request_worker, c_ref, {:write, key}, _}, {from_pid, _} = from, %{write_queue: wq} = sd) do
+  defp add_to_write_queue({:request_worker, c_ref, {:write, key}}, {from_pid, _} = from, %{write_queue: wq} = sd) do
     m_ref = Process.monitor(from_pid)
     wq = :queue.in({from, c_ref, m_ref, key}, wq)
     %{sd | write_queue: wq}
@@ -351,7 +363,7 @@ defmodule SpaghettiPool do
     add_to_monitors_table(pid, c_ref, m_ref, sd)
   end
 
-  defp handle_checkout({_, c_ref, {:write, key}, _}, {from_pid, _}, %{workers: [pid|_]} = sd) do
+  defp handle_checkout({_, c_ref, {:write, key}}, {from_pid, _}, %{workers: [pid|_]} = sd) do
     m_ref = Process.monitor(from_pid)
     add_to_monitors_table(pid, c_ref, m_ref, sd, key)
   end
@@ -387,5 +399,12 @@ defmodule SpaghettiPool do
         w = [new_worker(sup) | :lists.filter(fn (p) -> p != pid end, w)]
         %{sd | workers: w, waiting: empty}
     end
+  end
+
+  defp all_workers_available?(%{supervisor: sup, workers: w}) do
+    workers = sup |> Supervisor.which_children
+    n_workers = workers |> length
+    n_avail = length(w)
+    n_avail == n_workers
   end
 end
