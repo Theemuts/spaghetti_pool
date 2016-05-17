@@ -14,7 +14,7 @@ defmodule SpaghettiPool do
       :gen_fsm.sync_send_all_state_event(pool, {:request_worker, c_ref, type}, timeout)
     rescue
       e ->
-        :gen_fsm.send_all_state_event(pool, {:cancel_waiting, c_ref})
+        :gen_fsm.send_all_state_event(pool, {:cancel_waiting, c_ref, type})
         raise e
     end
   end
@@ -126,176 +126,224 @@ defmodule SpaghettiPool do
 
   ### Handle reads
 
-  def handle_reads(:handle_next, %{workers: w, processing_queue: queue, overflow: o, max_overflow: mo} = sd)
+  def handle_reads(:handle_next, %{workers: w, processing_queue: queue, overflow: o, max_overflow: mo} = state_data)
       when length(w) > 0 or (mo > 0 and mo > o) do
-    #IO.puts "hr #{all_workers_available?(sd)}"
     case :queue.out(queue) do
       {:empty, ^queue} ->
-        transition(:handle_reads, sd)
+        transition(:handle_reads, state_data)
       {{:value, {from, c_ref, _}}, queue} ->
-        {pid, sd} = handle_checkout({:request_worker, c_ref, :read}, from, sd)
+        {pid, state_data} = handle_checkout({:request_worker, c_ref, :read}, from, state_data)
         :gen_fsm.reply(from, pid)
-        handle_reads(:handle_next, %{sd | processing_queue: queue})
+        handle_reads(:handle_next, %{state_data | processing_queue: queue})
     end
   end
 
-  def handle_reads(:handle_next, %{workers: []} = sd) do
-    {:next_state, :await_readers, sd}
+  def handle_reads(:handle_next, %{workers: []} = state_data) do
+    {:next_state, :await_readers, state_data}
   end
 
   ### Handle writes
 
-  def handle_writes(:handle_next, %{workers: w, processing_queue: queue, current_write: cw, overflow: o, max_overflow: mo} = sd)
+  def handle_writes(:handle_next, %{workers: w, processing_queue: queue, current_write: cw, overflow: o, max_overflow: mo} = state_data)
       when length(w) > 0 or (mo > 0 and mo > o) do
-    #IO.puts "hw #{all_workers_available?(sd)}"
     case :queue.out(queue) do
       {:empty, ^queue} ->
-        #IO.puts 2
-        transition(:handle_writes, sd)
+        transition(:handle_writes, state_data)
       {{:value, {from, c_ref, _, key} = v}, queue} ->
         if MapSet.member?(cw, key) do
-          add_to_pending_write(v, from, sd)
+          add_to_pending_write(v, from, state_data)
         else
-          {pid, sd} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, sd)
+          {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
           :gen_fsm.reply(from, pid)
-          handle_writes(:handle_next, %{sd | processing_queue: queue})
+          handle_writes(:handle_next, %{state_data | processing_queue: queue})
         end
     end
   end
 
-  def handle_writes({:handle_pending, key}, %{workers: [pid|_], pending_write: pw} = sd) do
+  def handle_writes({:handle_pending, key}, %{workers: [pid|_], pending_write: pw} = state_data) do
     case :queue.out(pw[key]) do
       {:empty, _} ->
-        handle_writes(:handle_next, %{sd | pending_write: Map.delete(pw, key)})
+        handle_writes(:handle_next, %{state_data | pending_write: Map.delete(pw, key)})
       {{:value, {from, c_ref, _, key}}, queue} ->
-        {pid, sd} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, sd)
+        {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
         :gen_fsm.reply(from, pid)
-        handle_reads(:handle_next, %{sd | pending_write: %{pw | key => queue}})
+        handle_reads(:handle_next, %{state_data | pending_write: %{pw | key => queue}})
     end
   end
 
-  def handle_writes(:handle_next, %{workers: []} = sd) do
-    {:next_state, :await_writers, sd}
+  def handle_writes(:handle_next, %{workers: []} = state_data) do
+    {:next_state, :await_writers, state_data}
   end
 
   ### Lock acquired
-  def locked(:all_workers_acquired, %{locked_by: lb} = sd) do
+  def locked(:all_workers_acquired, %{locked_by: lb} = state_data) do
     :gen_fsm.reply(lb, :ok)
-    {:next_state, :locked, sd}
+    {:next_state, :locked, state_data}
   end
 
   ### Checkin workers
 
-  def handle_event({:checkin_worker, _, _} = e, :handle_reads, sd) do
-    #IO.puts "checkin while reading"
-    {_, sd} = handle_checkin(e, sd)
-    handle_reads(:handle_next, sd)
+  def handle_event({:checkin_worker, _, _} = e, :handle_reads, state_data) do
+    {_, state_data} = handle_checkin(e, state_data)
+    handle_reads(:handle_next, state_data)
   end
 
-  def handle_event({:checkin_worker, _, _} = e, :handle_writes, sd) do
-    #IO.puts "checkin while writing"
-    {_, sd} = handle_checkin(e, sd)
-    handle_writes(:handle_next, sd)
+  def handle_event({:checkin_worker, _, _} = e, :handle_writes, state_data) do
+    {_, state_data} = handle_checkin(e, state_data)
+    handle_writes(:handle_next, state_data)
   end
 
-  def handle_event({:checkin_worker, _, _} = e, :await_readers, %{processing_queue: q, write_queue: wq} = sd) do
-    #IO.puts "checkin while awaiting readers"
-    {nil, sd} = handle_checkin(e, sd)
+  def handle_event({:checkin_worker, _, _} = e, :await_readers, %{processing_queue: q, write_queue: wq} = state_data) do
+    {nil, state_data} = handle_checkin(e, state_data)
     empty_processing = :queue.is_empty(q)
-    all_available = all_workers_available?(sd)
+    all_available = all_workers_available?(state_data)
     empty_write = :queue.is_empty(wq)
 
     cond do
-      empty_processing and all_available and empty_write -> {:next_state, :all_workers_available, sd}
-      empty_processing and all_available -> handle_writes(:handle_next, %{sd | processing_queue: wq, write_queue: :queue.new, mode: :w})
-      empty_processing -> {:next_state, :await_readers, sd}
-      true -> handle_reads(:handle_next, sd)
+      empty_processing and all_available and empty_write -> {:next_state, :all_workers_available, state_data}
+      empty_processing and all_available -> handle_writes(:handle_next, %{state_data | processing_queue: wq, write_queue: :queue.new, mode: :w})
+      empty_processing -> {:next_state, :await_readers, state_data}
+      true -> handle_reads(:handle_next, state_data)
     end
   end
 
-  def handle_event({:checkin_worker, _, _} = e, :await_writers, %{processing_queue: q, read_queue: rq} = sd) do
-    #IO.puts "checkin while awaiting writers"
-    {key, sd} = handle_checkin(e, sd)
+  def handle_event({:checkin_worker, _, _} = e, :await_writers, %{processing_queue: q, read_queue: rq} = state_data) do
+    {key, state_data} = handle_checkin(e, state_data)
     empty_processing = :queue.is_empty(q)
-    all_available = all_workers_available?(sd)
+    all_available = all_workers_available?(state_data)
     empty_read = :queue.is_empty(rq)
-    pending_writes = pending_writes?(sd, key)
+    pending_writes = pending_writes?(state_data, key)
 
     cond do
-      pending_writes -> handle_writes({:handle_pending, key}, sd)
-      empty_processing and all_available and empty_read -> {:next_state, :all_workers_available, sd}
-      empty_processing and all_available -> handle_reads(:handle_next, %{sd | processing_queue: rq, read_queue: :queue.new, mode: :r})
-      empty_processing -> {:next_state, :await_writers, sd}
-      true -> handle_writes(:handle_next, sd)
+      pending_writes -> handle_writes({:handle_pending, key}, state_data)
+      empty_processing and all_available and empty_read -> {:next_state, :all_workers_available, state_data}
+      empty_processing and all_available -> handle_reads(:handle_next, %{state_data | processing_queue: rq, read_queue: :queue.new, mode: :r})
+      empty_processing -> {:next_state, :await_writers, state_data}
+      true -> handle_writes(:handle_next, state_data)
     end
   end
 
   ### Unlock pool
 
-  def handle_event(:unlock_pool, _, %{mode: mode} = sd) do
-    sd = handle_unlock(sd)
+  def handle_event(:unlock_pool, _, %{mode: mode} = state_data) do
+    state_data = handle_unlock(state_data)
 
     case mode do
-      :r -> handle_reads(:handle_next, sd)
-      :w -> handle_writes(:handle_next, sd)
+      :r -> handle_reads(:handle_next, state_data)
+      :w -> handle_writes(:handle_next, state_data)
+    end
+  end
+
+  ### Cancel waiting
+
+  def handle_event({:cancel_waiting, c_ref, :read}, state_name, %{monitors: mons, processing_queue: q} = state_data) do
+    case :ets.match(mons, {'$1', c_ref, '$2', nil}) do
+      [[pid, m_ref]] ->
+        Process.demonitor(m_ref, [:flush])
+        true = :ets.delete(mons, pid)
+        {nil, state_data} = handle_checkin({:checkin_worker, pid, :read}, %{monitors: mons, workers: w} = state_data)
+        transition(state_name, state_data)
+      [] ->
+        cancel = fn
+          ({_, ref, m_ref, _}) when ref == c_ref ->
+            Process.demonitor(m_ref, [:flush])
+            false
+          (_) ->
+            true
+        end
+        q = :queue.filter(cancel, q)
+        transition(state_name, %{state_data | processing_queue: q})
+    end
+  end
+
+  def handle_event({:cancel_waiting, c_ref, {:write, key}}, state_name, %{monitors: mons, processing_queue: q} = state_data) do
+    case :ets.match(mons, {'$1', c_ref, '$2', key}) do
+      [[pid, m_ref]] ->
+        Process.demonitor(m_ref, [:flush])
+        true = :ets.delete(mons, pid)
+        {nil, state_data} = handle_checkin({:checkin_worker, pid, :read}, %{monitors: mons, workers: w} = state_data)
+        pending_writes = pending_writes?(state_data, key)
+        if pending_writes do
+          handle_writes({:handle_pending, key}, state_data)
+        else
+          transition(state_name, state_data)
+        end
+      [] ->
+        cancel = fn
+          ({_, ref, m_ref, _}) when ref == c_ref ->
+            Process.demonitor(m_ref, [:flush])
+            false
+          (_) ->
+            true
+        end
+        q = :queue.filter(cancel, q)
+        transition(state_name, %{state_data | processing_queue: q})
+    end
+  end
+
+  ### Cancel lock
+
+  def handle_event({:cancel_lock, l_ref}, _, %{mode: mode, monitors: mons} = state_data) do
+    case :ets.match(mons, {nil, l_ref, '$2', nil}) do
+      [[m_ref]] ->
+        Process.demonitor(m_ref, [:flush])
+        true = :ets.delete(mons, nil)
+      [] ->
+        true
+    end
+
+    case mode do
+      :r -> transition(:handle_reads, state_data)
+      :w -> transition(:handle_writes, state_data)
     end
   end
 
   ### Request worker
 
-  def handle_sync_event({:request_worker, _, :read} = e, from, :all_workers_available, sd) do
-    #IO.puts "give reader"
-    {pid, sd} = handle_checkout(e, from, sd)
+  def handle_sync_event({:request_worker, _, :read} = e, from, :all_workers_available, state_data) do
+    {pid, state_data} = handle_checkout(e, from, state_data)
     :gen_fsm.reply(from, pid)
-    handle_reads(:handle_next, sd)
+    handle_reads(:handle_next, state_data)
   end
 
-  def handle_sync_event({:request_worker, _, {:write, _}} = e, from, :all_workers_available, sd) do
-    #IO.puts "give write worker"
-    #IO.puts "aa: #{all_workers_available?(sd)}"
-    {pid, sd} = handle_checkout(e, from, sd)
+  def handle_sync_event({:request_worker, _, {:write, _}} = e, from, :all_workers_available, state_data) do
+    {pid, state_data} = handle_checkout(e, from, state_data)
     :gen_fsm.reply(from, pid)
-    handle_writes(:handle_next, sd)
+    handle_writes(:handle_next, state_data)
   end
 
-  def handle_sync_event({:request_worker, _, :read} = e, from, state_name, sd) do
-    #IO.puts "queue read worker"
-    sd = add_to_read_queue(e, from, sd)
-    transition(state_name, sd)
+  def handle_sync_event({:request_worker, _, :read} = e, from, state_name, state_data) do
+    state_data = add_to_read_queue(e, from, state_data)
+    transition(state_name, state_data)
   end
 
-  def handle_sync_event({:request_worker, _, {:write, _}} = e, from, state_name, sd) do
-    #IO.puts "queue write worker"
-    sd = add_to_write_queue(e, from, sd)
-    transition(state_name, sd)
+  def handle_sync_event({:request_worker, _, {:write, _}} = e, from, state_name, state_data) do
+    state_data = add_to_write_queue(e, from, state_data)
+    transition(state_name, state_data)
   end
 
   ### Lock pool
 
-  def handle_sync_event({:lock_pool, l_ref}, {from_pid, _} = from, :all_workers_available, sd) do
-    #IO.puts "lock pool"
+  def handle_sync_event({:lock_pool, l_ref}, {from_pid, _} = from, :all_workers_available, state_data) do
     m_ref = Process.monitor(from_pid)
-    add_to_monitors_table(nil, l_ref, m_ref, sd, :lock)
-    {:reply, :ok, :locked, %{sd | locked_by: from}}
+    add_to_monitors_table(nil, l_ref, m_ref, state_data, :lock)
+    {:reply, :ok, :locked, %{state_data | locked_by: from}}
   end
 
-  def handle_sync_event({:lock_pool, _}, _, sn, sd)
-      when sn in [:pending_locked, :locked] do
-    #IO.puts "can't lock pool"
-    {:reply, :error, sn, sd}
+  def handle_sync_event({:lock_pool, _}, _, state_name, state_data)
+      when state_name in [:pending_locked, :locked] do
+    {:reply, :error, state_name, state_data}
   end
 
-  def handle_sync_event({:lock_pool, _}, from, _, sd) do
-    #IO.puts "await lock pool"
-    {:next_state, :pending_locked, %{sd | locked_by: from}}
+  def handle_sync_event({:lock_pool, _}, from, _, state_data) do
+    {:next_state, :pending_locked, %{state_data | locked_by: from}}
   end
 
   ### Status
 
-  def handle_sync_event(:status, from, state_name, sd) do
-    #IO.puts "queue write worker"
-    :gen_fsm.reply(from, {state_name, sd})
-    transition(state_name, sd)
+  def handle_sync_event(:status, from, state_name, state_data) do
+    :gen_fsm.reply(from, {state_name, state_data})
+    transition(state_name, state_data)
   end
 
   ### Handle caller down
@@ -370,22 +418,6 @@ defmodule SpaghettiPool do
     {pid, ref}
   end
 
-  defp maybe_dismiss_worker(queue, %{overflow: o, workers: [_ | w] = workers} = sd) when o > 0 do
-    if :queue.len(queue) > length(workers) do
-      dismiss_worker(sd)
-      %{sd | workers: w}
-    else
-      sd
-    end
-  end
-
-  defp maybe_dismiss_worker(_, sd), do: sd
-
-  defp dismiss_worker(%{supervisor: sup, workers: [pid|_]}) do
-    true = Process.unlink(pid)
-    Supervisor.terminate_child(sup, pid)
-  end
-
   defp prepopulate(n, _) when n < 1 do
     []
   end
@@ -402,156 +434,176 @@ defmodule SpaghettiPool do
     prepopulate(n-1, sup, [new_worker(sup) | workers])
   end
 
-  defp transition(state_name, %{processing_queue: q, write_queue: wq, read_queue: rq} = sd) do
-    all_available = all_workers_available?(sd)
+  defp maybe_dismiss_worker(queue, %{overflow: o, workers: [_ | w] = workers} = state_data) when o > 0 do
+    if :queue.len(queue) > length(workers) do
+      dismiss_worker(state_data)
+      %{state_data | workers: w}
+    else
+      state_data
+    end
+  end
+
+  defp maybe_dismiss_worker(_, state_data), do: state_data
+
+  defp dismiss_worker(%{supervisor: sup, workers: [pid|_]}) do
+    true = Process.unlink(pid)
+    Supervisor.terminate_child(sup, pid)
+  end
+
+  defp transition(state_name, %{processing_queue: q, write_queue: wq, read_queue: rq} = state_data) do
+    all_available = all_workers_available?(state_data)
     idle = (:queue.len(rq) + :queue.len(wq)) == 0
     fully_processed = :queue.len(q) == 0
 
     case state_name do
       :pending_locked when all_available ->
-        locked(:all_workers_acquired, sd)
+        locked(:all_workers_acquired, state_data)
       :pending_locked ->
-        {:next_state, :pending_locked, sd}
+        {:next_state, :pending_locked, state_data}
       :locked ->
-        {:next_state, :locked, sd}
+        {:next_state, :locked, state_data}
       _ when idle and all_available and fully_processed ->
-        {:next_state, :all_workers_available, sd}
+        {:next_state, :all_workers_available, state_data}
       :await_readers when all_available and fully_processed ->
-        handle_writes(:handle_next, %{sd | processing_queue: wq, write_queue: :queue.new, mode: :w})
+        handle_writes(:handle_next, %{state_data | processing_queue: wq, write_queue: :queue.new, mode: :w})
       :await_readers when all_available ->
-        handle_reads(:handle_next, sd)
+        handle_reads(:handle_next, state_data)
       :await_writes when all_available and fully_processed ->
-        handle_reads(:handle_next, %{sd | processing_queue: rq, read_queue: :queue.new, mode: :r})
+        handle_reads(:handle_next, %{state_data | processing_queue: rq, read_queue: :queue.new, mode: :r})
       :await_writers when all_available ->
-        handle_writes(:handle_next, sd)
+        handle_writes(:handle_next, state_data)
       :handle_reads when all_available and fully_processed ->
-        sd = maybe_dismiss_worker(wq, sd)
-        handle_writes(:handle_next, %{sd | processing_queue: wq, write_queue: :queue.new, mode: :w})
+        state_data = maybe_dismiss_worker(wq, state_data)
+        handle_writes(:handle_next, %{state_data | processing_queue: wq, write_queue: :queue.new, mode: :w})
       :handle_writes when all_available and fully_processed ->
-        sd = maybe_dismiss_worker(rq, sd)
-        handle_reads(:handle_next, %{sd | processing_queue: rq, read_queue: :queue.new, mode: :r})
+        state_data = maybe_dismiss_worker(rq, state_data)
+        handle_reads(:handle_next, %{state_data | processing_queue: rq, read_queue: :queue.new, mode: :r})
+      :handle_reads when all_available ->
+        handle_reads(:handle_next, state_data)
+      :handle_writes when all_available ->
+        handle_writes(:handle_next, state_data)
       _ ->
-        {:next_state, state_name, sd}
+        {:next_state, state_name, state_data}
     end
   end
 
-  defp handle_checkin({:checkin_worker, pid, :read}, %{monitors: mons, workers: w} = sd) do
+  defp handle_checkin({:checkin_worker, pid, :read}, %{monitors: mons, workers: w} = state_data) do
     case :ets.lookup(mons, pid) do
       [{^pid, _, m_ref, nil}] ->
         true = Process.demonitor(m_ref)
         true = :ets.delete(mons, pid)
-        {nil, %{sd | workers: [pid|w]}}
+        {nil, %{state_data | workers: [pid|w]}}
       [] ->
-        {nil, sd}
+        {nil, state_data}
     end
   end
 
-  defp handle_checkin({:checkin_worker, pid, {:write, key}}, %{monitors: mons, workers: w} = sd) do
+  defp handle_checkin({:checkin_worker, pid, {:write, key}}, %{monitors: mons, workers: w} = state_data) do
     case :ets.lookup(mons, pid) do
       [{^pid, _, m_ref, ^key}] ->
         true = Process.demonitor(m_ref)
         true = :ets.delete(mons, pid)
-        {key, %{sd | workers: [pid|w]}}
+        {key, %{state_data | workers: [pid|w]}}
       [] ->
-        {key, sd}
+        {key, state_data}
     end
   end
 
-  defp handle_unlock(%{monitors: mons} = sd) do
+  defp handle_unlock(%{monitors: mons} = state_data) do
     case :ets.lookup(mons, nil) do
       [{nil, _, m_ref, :lock}] ->
         true = Process.demonitor(m_ref)
         true = :ets.delete(mons, nil)
-        %{sd | locked_by: nil}
+        %{state_data | locked_by: nil}
       [] ->
-        {nil, sd}
+        state_data
     end
   end
 
   defp add_to_read_queue(a, b, c) do
     {:request_worker, c_ref, :read} = a
     from = {from_pid, _} = b
-    sd = %{read_queue: rq} = c
+    state_data = %{read_queue: rq} = c
     m_ref = Process.monitor(from_pid)
     rq = :queue.in({from, c_ref, m_ref}, rq)
-    %{sd | read_queue: rq}
+    %{state_data | read_queue: rq}
   end
 
-  defp add_to_write_queue({:request_worker, c_ref, {:write, key}}, {from_pid, _} = from, %{write_queue: wq} = sd) do
+  defp add_to_write_queue({:request_worker, c_ref, {:write, key}}, {from_pid, _} = from, %{write_queue: wq} = state_data) do
     m_ref = Process.monitor(from_pid)
     wq = :queue.in({from, c_ref, m_ref, key}, wq)
-    %{sd | write_queue: wq}
+    %{state_data | write_queue: wq}
   end
 
-  defp add_to_pending_write({_, c_ref, {:write, key}, _}, {from_pid, _} = from, %{pending_write: pw} = sd) do
+  defp add_to_pending_write({_, c_ref, {:write, key}, _}, {from_pid, _} = from, %{pending_write: pw} = state_data) do
     m_ref = Process.monitor(from_pid)
     val = {from, c_ref, m_ref, key}
     pw = Map.update(pw, key, :queue.from_list([val]), &:queue.in(val, &1))
-    %{sd | pending_write: pw}
+    %{state_data | pending_write: pw}
   end
 
-  defp handle_checkout({_, c_ref, :read}, {from_pid, _}, %{workers: [pid|w]} = sd) do
+  defp handle_checkout({_, c_ref, :read}, {from_pid, _}, %{workers: [pid|w]} = state_data) do
     m_ref = Process.monitor(from_pid)
     pid
-    |> add_to_monitors_table(c_ref, m_ref, sd)
+    |> add_to_monitors_table(c_ref, m_ref, state_data)
     |> update_workers(w)
   end
 
-  defp handle_checkout({_, c_ref, {:write, key}}, {from_pid, _}, %{workers: [pid|w]} = sd) do
+  defp handle_checkout({_, c_ref, {:write, key}}, {from_pid, _}, %{workers: [pid|w]} = state_data) do
     m_ref = Process.monitor(from_pid)
     pid
-    |> add_to_monitors_table(c_ref, m_ref, sd, key)
+    |> add_to_monitors_table(c_ref, m_ref, state_data, key)
     |> update_current_write
     |> update_workers(w)
   end
 
-  defp handle_checkout({_, c_ref, :read}, {from_pid, _}, %{workers: [], supervisor: sup} = sd) do
+  defp handle_checkout({_, c_ref, :read}, {from_pid, _}, %{workers: [], supervisor: sup} = state_data) do
     {pid, m_ref} = new_worker(sup, from_pid)
-    add_to_monitors_table(pid, c_ref, m_ref, sd)
+    add_to_monitors_table(pid, c_ref, m_ref, state_data)
   end
 
-  defp handle_checkout({_, c_ref, {:write, key}}, {from_pid, _}, %{supervisor: sup} = sd) do
+  defp handle_checkout({_, c_ref, {:write, key}}, {from_pid, _}, %{supervisor: sup} = state_data) do
     {pid, m_ref} = new_worker(sup, from_pid)
     pid
-    |> add_to_monitors_table(c_ref, m_ref, sd, key)
+    |> add_to_monitors_table(c_ref, m_ref, state_data, key)
     |> update_current_write
   end
 
-  def add_to_monitors_table(pid, c_ref, m_ref, %{monitors: mons, overflow: o, workers: w} = sd, key \\ nil) do
+  def add_to_monitors_table(pid, c_ref, m_ref, %{monitors: mons, overflow: o, workers: w} = state_data, key \\ nil) do
     true = :ets.insert(mons, {pid, c_ref, m_ref, key})
     case w do
-      [] -> {pid, %{sd | overflow: o + 1}}
-      [_|w] -> {pid, %{sd | workers: w}}
+      [] -> {pid, %{state_data | overflow: o + 1}}
+      [_|w] -> {pid, %{state_data | workers: w}}
     end
   end
 
-  defp update_current_write({key, %{current_write: cw} = sd}) do
-    {key, %{sd | current_write: MapSet.put(cw, key)}}
+  defp update_current_write({key, %{current_write: cw} = state_data}) do
+    {key, %{state_data | current_write: MapSet.put(cw, key)}}
   end
 
-  defp handle_worker_exit(pid, %{supervisor: sup, monitors: mons, overflow: o, processing_queue: q, workers: w} = sd, nil) do
+  defp handle_worker_exit(pid, %{supervisor: sup, monitors: mons, overflow: o, processing_queue: q, workers: w} = state_data, nil) do
     case :queue.out(q) do
       {{:value, {from, c_ref, m_ref, key}}, waiting} ->
         new_worker = new_worker(sup)
         true = :ets.insert(mons, {new_worker, c_ref, m_ref, key})
         :gen_fsm.reply(from, new_worker)
-        %{sd | processing_queue: waiting}
+        %{state_data | processing_queue: waiting}
       {:empty, empty} when o > 0 ->
-        %{sd | overflow: o - 1, processing_queue: empty}
+        %{state_data | overflow: o - 1, processing_queue: empty}
       {:empty, empty} ->
         w = [new_worker(sup) | :lists.filter(fn (p) -> p != pid end, w)]
-        %{sd | workers: w, processing_queue: empty}
+        %{state_data | workers: w, processing_queue: empty}
     end
   end
 
-  defp handle_worker_exit(pid, %{pending_write: pw} = sd, key) do
+  defp handle_worker_exit(pid, %{pending_write: pw} = state_data, key) do
     case pw[key] do
-      nil ->  handle_next_write(pid, sd, key)
-      pw_queue -> handle_pending_write(pw_queue, pid, sd, key)
+      nil ->  handle_next_write(pid, state_data, key)
+      pw_queue -> handle_pending_write(pw_queue, pid, state_data, key)
     end
   end
 
-  defp handle_next_write(pid, %{current_write: cw, supervisor: sup, monitors: mons, overflow: o, processing_queue: q, workers: w} = sd, key) do
+  defp handle_next_write(pid, %{current_write: cw, supervisor: sup, monitors: mons, overflow: o, processing_queue: q, workers: w} = state_data, key) do
     cw = MapSet.delete(cw, key)
 
     case :queue.out(q) do
@@ -559,27 +611,27 @@ defmodule SpaghettiPool do
         new_worker = new_worker(sup)
         true = :ets.insert(mons, {new_worker, c_ref, m_ref, key})
         :gen_fsm.reply(from, new_worker)
-        %{sd | processing_queue: waiting, current_write: MapSet.put(cw, key)}
+        %{state_data | processing_queue: waiting, current_write: MapSet.put(cw, key)}
       {:empty, empty} when o > 0 ->
-        %{sd | overflow: o - 1, processing_queue: empty}
+        %{state_data | overflow: o - 1, processing_queue: empty}
       {:empty, empty} ->
         w = [new_worker(sup) | :lists.filter(fn (p) -> p != pid end, w)]
-        %{sd | workers: w, processing_queue: empty}
+        %{state_data | workers: w, processing_queue: empty}
     end
   end
 
-  defp handle_pending_write(pw_queue, pid, %{supervisor: sup, monitors: mons, overflow: o, pending_write: pw, workers: w} = sd, key) do
+  defp handle_pending_write(pw_queue, pid, %{supervisor: sup, monitors: mons, overflow: o, pending_write: pw, workers: w} = state_data, key) do
     case :queue.out(pw_queue) do
       {{:value, {from, c_ref, m_ref, key}}, waiting} ->
         new_worker = new_worker(sup)
         true = :ets.insert(mons, {new_worker, c_ref, m_ref, key})
         :gen_fsm.reply(from, new_worker)
-        %{sd | pending_write: %{pw | key => waiting}}
+        %{state_data | pending_write: %{pw | key => waiting}}
       {:empty, _} when o > 0 ->
-        handle_next_write(pid, %{sd | overflow: o - 1, pending_write: Map.delete(pw, key)}, key)
+        handle_next_write(pid, %{state_data | overflow: o - 1, pending_write: Map.delete(pw, key)}, key)
       {:empty, _} ->
-        w = [new_worker(sup) | Enum.filter(w, fn (p) -> p != pid end)]
-        handle_next_write(pid, %{sd | workers: w, pending_write: Map.delete(pw, key)}, key)
+        w = [new_worker(sup) | :queue.filter(&(&1 != pid), w)]
+        handle_next_write(pid, %{state_data | workers: w, pending_write: Map.delete(pw, key)}, key)
     end
   end
 
@@ -596,7 +648,7 @@ defmodule SpaghettiPool do
     end
   end
 
-  defp update_workers({key, sd}, workers) do
-    {key, %{sd | workers: workers}}
+  defp update_workers({key, state_data}, workers) do
+    {key, %{state_data | workers: workers}}
   end
 end
