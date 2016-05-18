@@ -27,6 +27,11 @@ defmodule SpaghettiPool do
   @type child_spec :: {atom, {SpaghettiPool, :start_link, [list], :permanent, 5000, :worker, [SpaghettiPool]}}
 
   @timeout 5_000
+  @new_state %{supervisor: nil, workers: [], current_write: MapSet.new,
+               pending_write: %{}, processing_queue: :queue.new,
+               read_queue: :queue.new, write_queue: :queue.new, monitors: nil,
+               size: nil, overflow: 0, max_overflow: nil, strategy: nil,
+               locked_by: nil, mode: :r}
 
   ### Public API
 
@@ -76,7 +81,7 @@ defmodule SpaghettiPool do
     end
   end
 
-  @spec lock(atom) :: :ok
+  @spec unlock(atom) :: :ok
   def unlock(pool) do
     :gen_fsm.send_all_state_event(pool, :unlock_pool)
   end
@@ -96,66 +101,40 @@ defmodule SpaghettiPool do
 
   ### GenFSM callbacks
 
+  @spec start(list) :: {:ok, :all_workers_available, map}
   def start(pool_args), do: start(pool_args, pool_args)
 
+  @spec start(list, list) :: {:ok, :all_workers_available, map}
   def start(pool_args, worker_args), do: start_pool(:start, pool_args, worker_args)
 
+  @spec start_link(list) :: {:ok, :all_workers_available, map}
   def start_link(pool_args), do: start_link(pool_args, pool_args)
 
+  @spec start_link(list, list) :: {:ok, :all_workers_available, map}
   def start_link(pool_args, worker_args), do: start_pool(:start_link, pool_args, worker_args)
 
-  def stop(pool), do: :gen_fsm.sync_send_all_state_event(pool, :stop)
+  @spec stop(atom) :: :ok
+  def stop(pool), do: :gen_fsm.sync_send_all_state_event(pool, :stop) #TODO
 
   ### Init
 
+  @spec init({Keyword.t, any}) :: {:ok, :all_workers_available, map}
   def init({pool_args, worker_args}) do
     Process.flag(:trap_exit, true)
     mons = :ets.new(:monitors, [:private])
 
-    state_data = %{supervisor: nil,
-                   workers: [],
-                   current_write: MapSet.new,
-                   pending_write: %{},
-                   processing_queue: :queue.new,
-                   read_queue: :queue.new,
-                   write_queue: :queue.new,
-                   monitors: mons,
-                   size: 10,
-                   overflow: 0,
-                   max_overflow: 10,
-                   strategy: Keyword.get(pool_args, :max_overflow, :fifo),
-                   locked_by: nil,
-                   mode: :r}
-    init(pool_args, worker_args, state_data)
-  end
-
-  def init([{:worker_module, mod} | rest], worker_args, state_data) do
+    mod = Keyword.fetch!(pool_args, :worker_module)
     {:ok, sup} = SpaghettiPoolSupervisor.start_link(mod, worker_args)
-    init(rest, worker_args, %{state_data | supervisor: sup})
-  end
-
-  def init([{:size, size} | rest], worker_args, state_data) do
-    init(rest, worker_args, %{state_data | size: size})
-  end
-
-  def init([{:max_overflow, max_overflow} | rest], worker_args, state_data) do
-    init(rest, worker_args, %{state_data | max_overflow: max_overflow})
-  end
-
-  def init([{:strategy, :lifo} | rest], worker_args, state_data) do
-    init(rest, worker_args, %{state_data | strategy: :lifo})
-  end
-
-  def init([{:strategy, :fifo} | rest], worker_args, state_data) do
-    init(rest, worker_args, %{state_data | strategy: :fifo})
-  end
-
-  def init([_ | rest], worker_args, state_data) do
-    init(rest, worker_args, state_data)
-  end
-
-  def init([], _worker_args, %{size: size, supervisor: sup} = state_data) do
+    strat = Keyword.get(pool_args, :strategy, :fifo)
+    unless strat in [:fifo, :lifo], do: raise "Invalid strategy. Choose :lifo or :fifo."
+    size = Keyword.get(pool_args, :size, 10)
+    max_overflow = Keyword.get(pool_args, :max_overflow, 10)
     workers = prepopulate(size, sup)
+
+    state_data = %{@new_state | workers: workers, size: size, strategy: strat,
+                                supervisor: sup, max_overflow: max_overflow,
+                                monitors: mons}
+
     {:ok, :all_workers_available, %{state_data | workers: workers}}
   end
 
