@@ -236,61 +236,31 @@ defmodule SpaghettiPool do
 
   ### Cancel waiting
 
-  def handle_event({:cancel_waiting, c_ref, :read}, state_name, %{monitors: mons, processing_queue: q} = state_data) do
-    case :ets.match(mons, {'$1', c_ref, '$2', nil}) do
-      [[pid, m_ref]] ->
-        Process.demonitor(m_ref, [:flush])
-        true = :ets.delete(mons, pid)
-        {nil, state_data} = handle_checkin({:checkin_worker, pid, :read}, %{monitors: mons, workers: w} = state_data)
-        transition(state_name, state_data)
-      [] ->
-        cancel = fn
-          ({_, ref, m_ref, _}) when ref == c_ref ->
-            Process.demonitor(m_ref, [:flush])
-            false
-          (_) ->
-            true
-        end
-        q = :queue.filter(cancel, q)
-        transition(state_name, %{state_data | processing_queue: q})
+  def handle_event({:cancel_waiting, c_ref, :read}, state_name, %{monitors: mons} = state_data) do
+    case :ets.match(mons, {:"$1", c_ref, :"$2", nil}) do
+      [[pid, m_ref]] -> cancel_waiting(pid, m_ref, state_name, state_data)
+      [] -> cancel_waiting(c_ref, state_name, state_data)
     end
   end
 
-  def handle_event({:cancel_waiting, c_ref, {:write, key}}, state_name, %{monitors: mons, processing_queue: q} = state_data) do
-    case :ets.match(mons, {'$1', c_ref, '$2', key}) do
-      [[pid, m_ref]] ->
-        Process.demonitor(m_ref, [:flush])
-        true = :ets.delete(mons, pid)
-        {nil, state_data} = handle_checkin({:checkin_worker, pid, :read}, %{monitors: mons, workers: w} = state_data)
-        pending_writes = pending_writes?(state_data, key)
-        if pending_writes do
-          handle_writes({:handle_pending, key}, state_data)
-        else
-          transition(state_name, state_data)
-        end
-      [] ->
-        cancel = fn
-          ({_, ref, m_ref, _}) when ref == c_ref ->
-            Process.demonitor(m_ref, [:flush])
-            false
-          (_) ->
-            true
-        end
-        q = :queue.filter(cancel, q)
-        transition(state_name, %{state_data | processing_queue: q})
+  def handle_event({:cancel_waiting, c_ref, {:write, key}}, state_name, %{monitors: mons} = state_data) do
+    case :ets.match(mons, {:"$1", c_ref, :"$2", key}) do
+      [[pid, m_ref]] -> cancel_waiting(pid, m_ref, key, state_name, state_data)
+      [] -> cancel_waiting(c_ref, state_name, state_data)
     end
   end
 
   ### Cancel lock
 
   def handle_event({:cancel_lock, l_ref}, _, %{mode: mode, monitors: mons} = state_data) do
-    case :ets.match(mons, {nil, l_ref, '$2', nil}) do
+    case :ets.match(mons, {nil, l_ref, :"$1", :lock}) do
       [[m_ref]] ->
         Process.demonitor(m_ref, [:flush])
         true = :ets.delete(mons, nil)
-      [] ->
-        true
+      [] -> true
     end
+
+    state_data = %{state_data | locked_by: nil}
 
     case mode do
       :r -> transition(:handle_reads, state_data)
@@ -349,18 +319,19 @@ defmodule SpaghettiPool do
   ### Handle caller down
 
   def handle_info({:"DOWN", mon_ref, _, _, _}, state_name, %{monitors: mons, processing_queue: w, mode: mode} = state_data) do
-    case :ets.match(mons, {'$1', '_', mon_ref, '$2'}) do
+    case :ets.match(mons, {:"$1", :"_", mon_ref, :"$2"}) do
       [[pid, nil]] ->
         true = :ets.delete(mons, pid)
-        state_data = handle_checkin({:checkin_worker, pid, :read}, state_data)
+        {_, state_data} = handle_checkin({:checkin_worker, pid, :read}, state_data)
         transition(state_name, state_data)
       [[nil, :lock]] when state_name == :locked ->
+        # Erase the shard? This just restarts the pool.
         raise "The locking process died. It is unsafe to continue, as the data might be inconsistent."
       [[nil, :lock]] when state_name == :pending_locked and mode == :r->
         transition(state_name, state_data)
       [[pid, key]] ->
         true = :ets.delete(mons, pid)
-        state_data = handle_checkin({:checkin_worker, pid, {:write, key}}, state_data)
+        {_, state_data} = handle_checkin({:checkin_worker, pid, {:write, key}}, state_data)
         transition(state_name, state_data)
       [] ->
         w = :queue.filter(fn({_, _, r}) -> r != mon_ref end, w)
@@ -494,7 +465,7 @@ defmodule SpaghettiPool do
         true = :ets.delete(mons, pid)
         {nil, %{state_data | workers: [pid|w]}}
       [] ->
-        {nil, state_data}
+        {nil, %{state_data | workers: [pid|w]}}
     end
   end
 
@@ -641,14 +612,41 @@ defmodule SpaghettiPool do
     n_avail == n_workers
   end
 
-  defp pending_writes?(%{pending_write: pw}, key) do
-    case pw[key] do
-      nil -> false
-      _ -> true
-    end
-  end
+  defp pending_writes?(%{pending_write: pw}, key), do: not is_nil(pw[key])
 
   defp update_workers({key, state_data}, workers) do
     {key, %{state_data | workers: workers}}
+  end
+
+  defp cancel_waiting(pid, m_ref, state_name, %{monitors: mons} = state_data) do
+    Process.demonitor(m_ref, [:flush])
+    true = :ets.delete(mons, pid)
+    {nil, state_data} = handle_checkin({:checkin_worker, pid, :read}, state_data)
+    transition(state_name, state_data)
+  end
+
+  defp cancel_waiting(pid, m_ref, key, state_name, %{monitors: mons} = state_data) do
+    Process.demonitor(m_ref, [:flush])
+    true = :ets.delete(mons, pid)
+    {^key, state_data} = handle_checkin({:checkin_worker, pid, {:write, key}}, state_data)
+    pending_writes = pending_writes?(state_data, key)
+
+    if pending_writes do
+      handle_writes({:handle_pending, key}, state_data)
+    else
+      transition(state_name, state_data)
+    end
+  end
+
+  defp cancel_waiting(c_ref, state_name, %{processing_queue: q} = state_data) do
+    cancel = fn
+      ({_, ref, m_ref, _}) when ref == c_ref ->
+        Process.demonitor(m_ref, [:flush])
+        false
+      (_) ->
+        true
+    end
+    q = :queue.filter(cancel, q)
+    transition(state_name, %{state_data | processing_queue: q})
   end
 end
