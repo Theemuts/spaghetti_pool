@@ -1,12 +1,39 @@
 defmodule SpaghettiPool do
   use SpaghettiPool.FSM
 
+  @moduledoc """
+  A `:gen_fsm`-based reimplementation of `:poolboy` for concurrently read and
+  written ETS-tables.
+
+  If you wish to replace `poolboy` with `SpaghettiPool`, you must replace
+  calls to `:poolboy.child_spec/2` and `:poolboy.child_spec/3` with
+  `SpaghettiPool.child_spec/2` and `SpaghettiPool.child_spec/3` respectively.
+
+  The second replacement which is necessary is that `SpaghettiPool`
+  distinguishes between readers and writers. A single key cannot safely be
+  written to by two workers, but distinct keys can. Read access is assumed
+  to be safe in general.
+
+  Due to this blocking behaviour, all workers must be checked out
+  asynchronously, and the type (and key in case of a requested reader) must be
+  known on checkout time. As a result, `checkout`, `transaction` and `checkin`
+  take different arguments. The return value of `status` is different as well.
+  See the documentation of those functions for more information.
+
+  Additionally, this pool offers the functionality to lock and unlock a pool
+  of workers.
+  """
+
+  @type child_spec :: {atom, {SpaghettiPool, :start_link, [list], :permanent, 5000, :worker, [SpaghettiPool]}}
+
   @timeout 5_000
 
   ### Public API
 
+  @spec checkout(atom, :read | {:write, any}) :: pid
   def checkout(pool, type), do: checkout(pool, type, @timeout)
 
+  @spec checkout(atom, :read | {:write, any}, non_neg_integer) :: pid
   def checkout(pool, type, timeout) do
     c_ref = make_ref()
 
@@ -19,11 +46,14 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec checkin(atom, pid, :read | {:write, any}) :: :ok
   def checkin(pool, worker, type), do: :gen_fsm.send_all_state_event(pool, {:checkin_worker, worker, type})
 
+  @spec transaction(atom, :read | {:write, any}, (pid -> any)) :: any
   def transaction(pool, type, fun), do: transaction(pool, type, fun, @timeout)
 
-  def transaction(pool, type,fun, timeout) do
+  @spec transaction(atom, :read | {:write, any}, (pid -> any), non_neg_integer) :: any
+  def transaction(pool, type, fun, timeout) do
     worker = checkout(pool, type, timeout)
 
     try do
@@ -33,6 +63,7 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec lock(atom, non_neg_integer) :: :ok
   def lock(pool, timeout \\ @timeout) do
     l_ref = make_ref()
 
@@ -45,14 +76,18 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec lock(atom) :: :ok
   def unlock(pool) do
     :gen_fsm.send_all_state_event(pool, :unlock_pool)
   end
 
+  @spec status(atom) :: {atom, map}
   def status(pool), do: :gen_fsm.sync_send_all_state_event(pool, :status)
 
+  @spec child_spec(atom, list) :: child_spec
   def child_spec(pool_id, pool_args), do: child_spec(pool_id, pool_args, [])
 
+  @spec child_spec(atom, list, list) :: child_spec
   def child_spec(pool_id, pool_args, worker_args) do
     {pool_id, {SpaghettiPool, :start_link, [pool_args, worker_args]}, :permanent, 5000, :worker, [SpaghettiPool]}
   end
