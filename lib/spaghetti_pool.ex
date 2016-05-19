@@ -12,11 +12,12 @@ defmodule SpaghettiPool do
   The second replacement which is necessary is that `SpaghettiPool`
   distinguishes between readers and writers. A single key cannot safely be
   written to by two workers, but distinct keys can. Read access is assumed
-  to be safe in general.
+  to be safe in general, if this is not true in your use case, always use
+  write workers.
 
-  Due to this blocking behaviour, all workers must be checked out
-  asynchronously, and the type (and key in case of a requested reader) must be
-  known on checkout time. As a result, `checkout`, `transaction` and `checkin`
+  Due to this blocking behaviour, all workers are checked out asynchronously,
+  and the type (and key in case of a requested reader) must be known on
+  checkout time. As a result, `checkout/3`, `transaction/4` and `checkin/3`
   take different arguments. The return value of `status` is different as well.
   See the documentation of those functions for more information.
 
@@ -25,6 +26,7 @@ defmodule SpaghettiPool do
   """
 
   @type child_spec :: {atom, {SpaghettiPool, :start_link, [list], :permanent, 5000, :worker, [SpaghettiPool]}}
+  @type transition :: {:next_state, atom, map}
 
   @timeout 5_000
   @new_state %{supervisor: nil, workers: [], current_write: MapSet.new,
@@ -35,11 +37,17 @@ defmodule SpaghettiPool do
 
   ### Public API
 
-  @spec checkout(atom, :read | {:write, any}) :: pid
-  def checkout(pool, type), do: checkout(pool, type, @timeout)
+  @doc """
+  Checkout a worker with given timeout.
 
+  This function expects three arguments:
+    - `pool`: the name of the pool the worker belongs to.
+    - `type`: either `:read` or `{:write, key}`.
+    - `timeout`: the maximum time spent waiting for a worker, defaults to
+    5000 milliseconds.
+  """
   @spec checkout(atom, :read | {:write, any}, non_neg_integer) :: pid
-  def checkout(pool, type, timeout) do
+  def checkout(pool, type, timeout \\ @timeout) do
     c_ref = make_ref()
 
     try do
@@ -51,14 +59,29 @@ defmodule SpaghettiPool do
     end
   end
 
+  @doc """
+  Checkin a worker.
+
+  This function expects three arguments:
+    - `pool`: the name of the pool the worker belongs to.
+    - `pid`: the worker `pid`.
+    - `type`: either `:read` or `{:write, key}`.
+  """
   @spec checkin(atom, pid, :read | {:write, any}) :: :ok
   def checkin(pool, worker, type), do: :gen_fsm.send_all_state_event(pool, {:checkin_worker, worker, type})
 
-  @spec transaction(atom, :read | {:write, any}, (pid -> any)) :: any
-  def transaction(pool, type, fun), do: transaction(pool, type, fun, @timeout)
+  @doc """
+  Checkout a worker, use it to perform a transaction, and check it back in.
 
+  This function expects four arguments:
+    - `pool`: the name of the pool the worker belongs to.
+    - `type`: either `:read` or `{:write, key}`.
+    - `fun`: an anonymous function with arity 1, the argument is the worker pid.
+    - `timeout`: the maximum time spent waiting for a worker, defaults to
+    5000 milliseconds.
+  """
   @spec transaction(atom, :read | {:write, any}, (pid -> any), non_neg_integer) :: any
-  def transaction(pool, type, fun, timeout) do
+  def transaction(pool, type, fun, timeout \\ @timeout) do
     worker = checkout(pool, type, timeout)
 
     try do
@@ -68,6 +91,15 @@ defmodule SpaghettiPool do
     end
   end
 
+  @doc """
+  Lock a pool. When a pool is locked, none of the workers can perform any
+  action.
+
+  This function expects two arguments:
+    - `pool`: the name of the pool the worker belongs to.
+    - `timeout`: the maximum time spent waiting for a worker, defaults to
+    5000 milliseconds.
+  """
   @spec lock(atom, non_neg_integer) :: :ok
   def lock(pool, timeout \\ @timeout) do
     l_ref = make_ref()
@@ -81,65 +113,111 @@ defmodule SpaghettiPool do
     end
   end
 
+  @doc """
+  Unlock a locked pool.
+
+  This function expects one argument:
+    - `pool`: the name of the pool the worker belongs to.
+  """
   @spec unlock(atom) :: :ok
   def unlock(pool) do
     :gen_fsm.send_all_state_event(pool, :unlock_pool)
   end
 
+  @doc """
+  Get the pool's current state name and data.
+
+  This function expects one argument:
+    - `pool`: the name of the pool the worker belongs to.
+  """
   @spec status(atom) :: {atom, map}
   def status(pool), do: :gen_fsm.sync_send_all_state_event(pool, :status)
 
+  @doc """
+  Calls `:child_spec/3` with the same arguments for the pool and the worker.
+  """
   @spec child_spec(atom, list) :: child_spec
-  def child_spec(pool_id, pool_args), do: child_spec(pool_id, pool_args, [])
+  def child_spec(pool_name, args), do: child_spec(pool_name, args, args)
 
+  @doc """
+  A supervisor has children, this function generates the appropriate specifier
+  for the pool workers. It expects three argument:
+    - `pool_name`: the name of this pool.
+    - `pool_args`: the arguments for this pool.
+    - `workers_args`: the arguments for this pool's worker module.
+
+  The second argument, `pool_args`, must be a keyword list which has the key
+  `:worker_module`, having the worker module as its value.
+
+  Three other options can be set in `pool_args`, besides the required
+  `:worker_module`. These are:
+    - `:size`: the minimum number of workers, 10 by default.
+    -`:max_overflow`: the maximum number of additional workers, 10 by
+    default.
+    - `:strategy`: The worker assignment strategy, must be either `:fifo` or
+    `:lifo`. Defaults to `:fifo`.
+
+  If no third argument is given, the workers receive the same arguments as
+  the pool.
+
+      # Example
+  """
   @spec child_spec(atom, list, list) :: child_spec
-  def child_spec(pool_id, pool_args, worker_args) do
-    {pool_id, {SpaghettiPool, :start_link, [pool_args, worker_args]}, :permanent, 5000, :worker, [SpaghettiPool]}
+  def child_spec(pool_name, pool_args, worker_args) do
+    {pool_name, {SpaghettiPool, :start_link, [pool_args, worker_args]}, :permanent, 5000, :worker, [SpaghettiPool]}
   end
 
   ### GenFSM
 
   ### GenFSM callbacks
 
+  @doc false
   @spec start(list) :: {:ok, :all_workers_available, map}
   def start(pool_args), do: start(pool_args, pool_args)
 
+  @doc false
   @spec start(list, list) :: {:ok, :all_workers_available, map}
   def start(pool_args, worker_args), do: start_pool(:start, pool_args, worker_args)
 
+  @doc false
   @spec start_link(list) :: {:ok, :all_workers_available, map}
   def start_link(pool_args), do: start_link(pool_args, pool_args)
 
+  @doc false
   @spec start_link(list, list) :: {:ok, :all_workers_available, map}
   def start_link(pool_args, worker_args), do: start_pool(:start_link, pool_args, worker_args)
 
+  @doc false
   @spec stop(atom) :: :ok
-  def stop(pool), do: :gen_fsm.sync_send_all_state_event(pool, :stop) #TODO
+  def stop(pool), do: :gen_fsm.sync_send_all_state_event(pool, :stop)
 
   ### Init
 
+  @doc false
   @spec init({Keyword.t, any}) :: {:ok, :all_workers_available, map}
   def init({pool_args, worker_args}) do
     Process.flag(:trap_exit, true)
     mons = :ets.new(:monitors, [:private])
 
-    mod = Keyword.fetch!(pool_args, :worker_module)
-    {:ok, sup} = SpaghettiPoolSupervisor.start_link(mod, worker_args)
-    strat = Keyword.get(pool_args, :strategy, :fifo)
-    unless strat in [:fifo, :lifo], do: raise "Invalid strategy. Choose :lifo or :fifo."
-    size = Keyword.get(pool_args, :size, 10)
+    mod =          Keyword.fetch!(pool_args, :worker_module)
+    size =         Keyword.get(pool_args, :size, 10)
     max_overflow = Keyword.get(pool_args, :max_overflow, 10)
-    workers = prepopulate(size, sup)
+    strat =        Keyword.get(pool_args, :strategy, :fifo)
 
-    state_data = %{@new_state | workers: workers, size: size, strategy: strat,
-                                supervisor: sup, max_overflow: max_overflow,
-                                monitors: mons}
+    unless strat in [:fifo, :lifo], do: raise "Invalid strategy. Choose :lifo or :fifo."
 
-    {:ok, :all_workers_available, %{state_data | workers: workers}}
+    {:ok, sup} = SpaghettiPoolSupervisor.start_link(mod, worker_args)
+    state_data = %{@new_state | workers: prepopulate(size, sup), size: size,
+                                strategy: strat, supervisor: sup,
+                                max_overflow: max_overflow, monitors: mons}
+
+    {:ok, :all_workers_available, state_data}
   end
 
   ### Handle reads
 
+  @doc false
+  @spec handle_reads(:handle_next, map) :: transition
   def handle_reads(:handle_next, %{workers: w, processing_queue: queue, overflow: o, max_overflow: mo} = state_data)
       when length(w) > 0 or (mo > 0 and mo > o) do
     case :queue.out(queue) do
@@ -158,6 +236,8 @@ defmodule SpaghettiPool do
 
   ### Handle writes
 
+  @doc false
+  @spec handle_writes(:handle_next | :handle_pending, map) :: transition
   def handle_writes(:handle_next, %{workers: w, processing_queue: queue, current_write: cw, overflow: o, max_overflow: mo} = state_data)
       when length(w) > 0 or (mo > 0 and mo > o) do
     case :queue.out(queue) do
@@ -174,6 +254,10 @@ defmodule SpaghettiPool do
     end
   end
 
+  def handle_writes(:handle_next, %{workers: []} = state_data) do
+    {:next_state, :await_writers, state_data}
+  end
+
   def handle_writes({:handle_pending, key}, %{workers: [pid|_], pending_write: pw} = state_data) do
     case :queue.out(pw[key]) do
       {:empty, _} ->
@@ -181,15 +265,13 @@ defmodule SpaghettiPool do
       {{:value, {from, c_ref, _, key}}, queue} ->
         {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
         :gen_fsm.reply(from, pid)
-        handle_reads(:handle_next, %{state_data | pending_write: %{pw | key => queue}})
+        handle_writes(:handle_next, %{state_data | pending_write: %{pw | key => queue}})
     end
   end
 
-  def handle_writes(:handle_next, %{workers: []} = state_data) do
-    {:next_state, :await_writers, state_data}
-  end
-
   ### Lock acquired
+  @doc false
+  @spec locked(:all_workers_acquired, map) :: {:next_state, :locked, map}
   def locked(:all_workers_acquired, %{locked_by: lb} = state_data) do
     :gen_fsm.reply(lb, :ok)
     {:next_state, :locked, state_data}
@@ -197,6 +279,7 @@ defmodule SpaghettiPool do
 
   ### Checkin workers
 
+  @doc false
   def handle_event({:checkin_worker, _, _} = e, :handle_reads, state_data) do
     {_, state_data} = handle_checkin(e, state_data)
     handle_reads(:handle_next, state_data)
@@ -284,6 +367,7 @@ defmodule SpaghettiPool do
 
   ### Request worker
 
+  @doc false
   def handle_sync_event({:request_worker, _, :read} = e, from, :all_workers_available, state_data) do
     {pid, state_data} = handle_checkout(e, from, state_data)
     :gen_fsm.reply(from, pid)
@@ -330,8 +414,20 @@ defmodule SpaghettiPool do
     transition(state_name, state_data)
   end
 
+  ### Stop
+
+  def handle_sync_event(:stop, from, state_name, state_data) do
+    {:stop, :normal, :ok, state_name, state_data}
+  end
+
+  def handle_sync_event(_, from, state_name, state_data) do
+    :gen_fsm.reply(from, {:error, :invalid_message})
+    transition(state_name, state_data)
+  end
+
   ### Handle caller down
 
+  @doc false
   def handle_info({:"DOWN", mon_ref, _, _, _}, state_name, %{monitors: mons, processing_queue: w, mode: mode} = state_data) do
     case :ets.match(mons, {:"$1", :"_", mon_ref, :"$2"}) do
       [[pid, nil]] ->
@@ -372,8 +468,13 @@ defmodule SpaghettiPool do
     end
   end
 
+  def handle_info(_, state_name, state_data) do
+    transition(state_name, state_data)
+  end
+
   ### Terminate
 
+  @doc false
   def terminate(_reason, _state_name, %{workers: workers, supervisor: sup}) do
     :ok = Enum.each(workers, fn(w) -> Process.unlink(w) end)
     true = Process.exit(sup, :shutdown)
@@ -554,7 +655,7 @@ defmodule SpaghettiPool do
     |> update_current_write
   end
 
-  def add_to_monitors_table(pid, c_ref, m_ref, %{monitors: mons, overflow: o, workers: w} = state_data, key \\ nil) do
+  defp add_to_monitors_table(pid, c_ref, m_ref, %{monitors: mons, overflow: o, workers: w} = state_data, key \\ nil) do
     true = :ets.insert(mons, {pid, c_ref, m_ref, key})
     case w do
       [] -> {pid, %{state_data | overflow: o + 1}}
