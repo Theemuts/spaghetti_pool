@@ -16,17 +16,37 @@ defmodule SpaghettiPool do
   write workers.
 
   Due to this blocking behaviour, all workers are checked out asynchronously,
-  and the type (and key in case of a requested reader) must be known on
+  and the type (and key in case of a requested reader) must be known at
   checkout time. As a result, `checkout/3`, `transaction/4` and `checkin/3`
   take different arguments. The return value of `status` is different as well.
   See the documentation of those functions for more information.
+
+
 
   Additionally, this pool offers the functionality to lock and unlock a pool
   of workers.
   """
 
-  @type child_spec :: {atom, {SpaghettiPool, :start_link, [list], :permanent, 5000, :worker, [SpaghettiPool]}}
-  @type transition :: {:next_state, atom, map}
+  @type pool :: atom
+  @type key :: any
+  @type worker_type :: :read | {:write, key}
+  @type sp_timeout :: non_neg_integer
+  @type worker :: pid
+  @type transaction_fun :: (worker -> any)
+  @type state_name :: atom
+  @type state :: map
+  @type pool_opts :: Keyword.t
+  @type worker_args :: any
+  @type start :: {:ok, :all_workers_available, state}
+  @type handle_next_read :: :handle_next
+  @type handle_next_write :: :handle_next| {:handle_pending, key}
+  @type in_queue :: {from, reference, reference, key}
+
+  @type child_spec :: Supervisor.child_spec
+  @type silent_transition :: {:next_state, atom, map}
+  @type transition :: {:reply, any, state_name, state} | silent_transition
+  @typep request :: {atom, reference | pid, :read | {:write, any} | map} | {:lock, reference} | atom
+  @typep from :: {pid, reference}
 
   @timeout 5_000
   @new_state %{supervisor: nil, workers: [], current_write: MapSet.new,
@@ -45,8 +65,15 @@ defmodule SpaghettiPool do
     - `type`: either `:read` or `{:write, key}`.
     - `timeout`: the maximum time spent waiting for a worker, defaults to
     5000 milliseconds.
+
+  This function returns the `pid` of your worker, or times out.
+
+  Reusing checked out read workers to read multiple keys is safe, but you
+  should check out multiple write workers to handle multiple writes.
+  Currently, it is not possible to checkout a single worker to handle multiple
+  writes, or request multiple writers with a single call to checkout.
   """
-  @spec checkout(atom, :read | {:write, any}, non_neg_integer) :: pid
+  @spec checkout(pool, worker_type, sp_timeout) :: pid
   def checkout(pool, type, timeout \\ @timeout) do
     c_ref = make_ref()
 
@@ -60,14 +87,14 @@ defmodule SpaghettiPool do
   end
 
   @doc """
-  Checkin a worker.
+  Check a worker back.
 
   This function expects three arguments:
     - `pool`: the name of the pool the worker belongs to.
     - `pid`: the worker `pid`.
     - `type`: either `:read` or `{:write, key}`.
   """
-  @spec checkin(atom, pid, :read | {:write, any}) :: :ok
+  @spec checkin(pool, worker, worker_type) :: :ok
   def checkin(pool, worker, type), do: :gen_fsm.send_all_state_event(pool, {:checkin_worker, worker, type})
 
   @doc """
@@ -80,7 +107,7 @@ defmodule SpaghettiPool do
     - `timeout`: the maximum time spent waiting for a worker, defaults to
     5000 milliseconds.
   """
-  @spec transaction(atom, :read | {:write, any}, (pid -> any), non_neg_integer) :: any
+  @spec transaction(pool, worker_type, transaction_fun, sp_timeout) :: any
   def transaction(pool, type, fun, timeout \\ @timeout) do
     worker = checkout(pool, type, timeout)
 
@@ -97,10 +124,10 @@ defmodule SpaghettiPool do
 
   This function expects two arguments:
     - `pool`: the name of the pool the worker belongs to.
-    - `timeout`: the maximum time spent waiting for a worker, defaults to
+    - `timeout`: the maximum time spent awaiting the lock, defaults to
     5000 milliseconds.
   """
-  @spec lock(atom, non_neg_integer) :: :ok
+  @spec lock(pool, sp_timeout) :: :ok
   def lock(pool, timeout \\ @timeout) do
     l_ref = make_ref()
 
@@ -119,7 +146,7 @@ defmodule SpaghettiPool do
   This function expects one argument:
     - `pool`: the name of the pool the worker belongs to.
   """
-  @spec unlock(atom) :: :ok
+  @spec unlock(pool) :: :ok
   def unlock(pool) do
     :gen_fsm.send_all_state_event(pool, :unlock_pool)
   end
@@ -130,13 +157,13 @@ defmodule SpaghettiPool do
   This function expects one argument:
     - `pool`: the name of the pool the worker belongs to.
   """
-  @spec status(atom) :: {atom, map}
+  @spec status(pool) :: {state_name, state}
   def status(pool), do: :gen_fsm.sync_send_all_state_event(pool, :status)
 
   @doc """
   Calls `:child_spec/3` with the same arguments for the pool and the worker.
   """
-  @spec child_spec(atom, list) :: child_spec
+  @spec child_spec(pool, pool_opts) :: child_spec
   def child_spec(pool_name, args), do: child_spec(pool_name, args, args)
 
   @doc """
@@ -162,7 +189,7 @@ defmodule SpaghettiPool do
 
       # Example
   """
-  @spec child_spec(atom, list, list) :: child_spec
+  @spec child_spec(atom, pool_opts, worker_args) :: child_spec
   def child_spec(pool_name, pool_args, worker_args) do
     {pool_name, {SpaghettiPool, :start_link, [pool_args, worker_args]}, :permanent, 5000, :worker, [SpaghettiPool]}
   end
@@ -172,29 +199,29 @@ defmodule SpaghettiPool do
   ### GenFSM callbacks
 
   @doc false
-  @spec start(list) :: {:ok, :all_workers_available, map}
+  @spec start(pool_opts) :: start
   def start(pool_args), do: start(pool_args, pool_args)
 
   @doc false
-  @spec start(list, list) :: {:ok, :all_workers_available, map}
+  @spec start(pool_opts, worker_args) :: start
   def start(pool_args, worker_args), do: start_pool(:start, pool_args, worker_args)
 
   @doc false
-  @spec start_link(list) :: {:ok, :all_workers_available, map}
+  @spec start_link(pool_opts) :: start
   def start_link(pool_args), do: start_link(pool_args, pool_args)
 
   @doc false
-  @spec start_link(list, list) :: {:ok, :all_workers_available, map}
+  @spec start_link(pool_opts, worker_args) :: start
   def start_link(pool_args, worker_args), do: start_pool(:start_link, pool_args, worker_args)
 
   @doc false
-  @spec stop(atom) :: :ok
+  @spec stop(pool) :: :ok
   def stop(pool), do: :gen_fsm.sync_send_all_state_event(pool, :stop)
 
   ### Init
 
   @doc false
-  @spec init({Keyword.t, any}) :: {:ok, :all_workers_available, map}
+  @spec init({pool_opts, worker_args}) :: start
   def init({pool_args, worker_args}) do
     Process.flag(:trap_exit, true)
     mons = :ets.new(:monitors, [:private])
@@ -217,7 +244,7 @@ defmodule SpaghettiPool do
   ### Handle reads
 
   @doc false
-  @spec handle_reads(:handle_next, map) :: transition
+  @spec handle_reads(handle_next_read, state) :: transition
   def handle_reads(:handle_next, %{workers: w, processing_queue: queue, overflow: o, max_overflow: mo} = state_data)
       when length(w) > 0 or (mo > 0 and mo > o) do
     case :queue.out(queue) do
@@ -237,7 +264,7 @@ defmodule SpaghettiPool do
   ### Handle writes
 
   @doc false
-  @spec handle_writes(:handle_next | :handle_pending, map) :: transition
+  @spec handle_writes(handle_next_write, state) :: transition
   def handle_writes(:handle_next, %{workers: w, processing_queue: queue, current_write: cw, overflow: o, max_overflow: mo} = state_data)
       when length(w) > 0 or (mo > 0 and mo > o) do
     case :queue.out(queue) do
@@ -245,7 +272,8 @@ defmodule SpaghettiPool do
         transition(:handle_writes, state_data)
       {{:value, {from, c_ref, _, key} = v}, queue} ->
         if MapSet.member?(cw, key) do
-          add_to_pending_write(v, from, state_data)
+          add_to_pending_write(v, state_data)
+          handle_writes(:handle_next, state_data)
         else
           {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
           :gen_fsm.reply(from, pid)
@@ -271,7 +299,7 @@ defmodule SpaghettiPool do
 
   ### Lock acquired
   @doc false
-  @spec locked(:all_workers_acquired, map) :: {:next_state, :locked, map}
+  @spec locked(:all_workers_acquired, state) :: {:next_state, :locked, state}
   def locked(:all_workers_acquired, %{locked_by: lb} = state_data) do
     :gen_fsm.reply(lb, :ok)
     {:next_state, :locked, state_data}
@@ -280,6 +308,7 @@ defmodule SpaghettiPool do
   ### Checkin workers
 
   @doc false
+  @spec handle_event(request, state_name, state) :: silent_transition
   def handle_event({:checkin_worker, _, _} = e, :handle_reads, state_data) do
     {_, state_data} = handle_checkin(e, state_data)
     handle_reads(:handle_next, state_data)
@@ -368,6 +397,7 @@ defmodule SpaghettiPool do
   ### Request worker
 
   @doc false
+  @spec handle_sync_event(request, from, state_name, state) :: transition
   def handle_sync_event({:request_worker, _, :read} = e, from, :all_workers_available, state_data) do
     {pid, state_data} = handle_checkout(e, from, state_data)
     :gen_fsm.reply(from, pid)
@@ -416,7 +446,7 @@ defmodule SpaghettiPool do
 
   ### Stop
 
-  def handle_sync_event(:stop, from, state_name, state_data) do
+  def handle_sync_event(:stop, _, state_name, state_data) do
     {:stop, :normal, :ok, state_name, state_data}
   end
 
@@ -428,6 +458,7 @@ defmodule SpaghettiPool do
   ### Handle caller down
 
   @doc false
+  @spec handle_info(tuple, state_name, state) :: silent_transition
   def handle_info({:"DOWN", mon_ref, _, _, _}, state_name, %{monitors: mons, processing_queue: w, mode: mode} = state_data) do
     case :ets.match(mons, {:"$1", :"_", mon_ref, :"$2"}) do
       [[pid, nil]] ->
@@ -475,6 +506,7 @@ defmodule SpaghettiPool do
   ### Terminate
 
   @doc false
+  @spec terminate(any, state_name, state) :: :ok
   def terminate(_reason, _state_name, %{workers: workers, supervisor: sup}) do
     :ok = Enum.each(workers, fn(w) -> Process.unlink(w) end)
     true = Process.exit(sup, :shutdown)
@@ -483,6 +515,7 @@ defmodule SpaghettiPool do
 
   ## PRIVATE HELPERS
 
+  @spec start_pool(:start | :start_link, pool_opts, worker_args) :: :gen_fsm.start | :gen_fsm.start_link
   defp start_pool(start_fun, pool_args, worker_args) do
     case Keyword.get(pool_args, :name) do
       nil ->
@@ -492,18 +525,21 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec new_worker(pid) :: pid
   defp new_worker(sup) do
     {:ok, pid} = Supervisor.start_child(sup, [])
     true = Process.link(pid)
     pid
   end
 
+  @spec new_worker(pid, pid) :: {pid, reference}
   defp new_worker(sup, from_pid) do
     pid = new_worker(sup)
     ref = Process.monitor(from_pid)
     {pid, ref}
   end
 
+  @spec prepopulate(integer, pid) :: list
   defp prepopulate(n, _) when n < 1 do
     []
   end
@@ -512,6 +548,7 @@ defmodule SpaghettiPool do
     prepopulate(n, sup, [])
   end
 
+  @spec prepopulate(non_neg_integer, pid, list) :: list
   defp prepopulate(0, _sup, workers) do
     workers
   end
@@ -520,6 +557,7 @@ defmodule SpaghettiPool do
     prepopulate(n-1, sup, [new_worker(sup) | workers])
   end
 
+  @spec maybe_dismiss_worker(:queue.queue, state) :: state
   defp maybe_dismiss_worker(queue, %{overflow: o, workers: [_ | w] = workers} = state_data) when o > 0 do
     if :queue.len(queue) > length(workers) do
       dismiss_worker(state_data)
@@ -531,11 +569,13 @@ defmodule SpaghettiPool do
 
   defp maybe_dismiss_worker(_, state_data), do: state_data
 
+  @spec dismiss_worker(state) :: Supervisor.terminate_child
   defp dismiss_worker(%{supervisor: sup, workers: [pid|_]}) do
     true = Process.unlink(pid)
     Supervisor.terminate_child(sup, pid)
   end
 
+  @spec transition(state_name, state) :: transition
   defp transition(state_name, %{processing_queue: q, write_queue: wq, read_queue: rq} = state_data) do
     all_available = all_workers_available?(state_data)
     idle = (:queue.len(rq) + :queue.len(wq)) == 0
@@ -573,6 +613,7 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec handle_checkin(request, state) :: {key, state}
   defp handle_checkin({:checkin_worker, pid, :read}, %{monitors: mons, workers: w} = state_data) do
     case :ets.lookup(mons, pid) do
       [{^pid, _, m_ref, nil}] ->
@@ -595,6 +636,7 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec handle_unlock(state) :: state
   defp handle_unlock(%{monitors: mons} = state_data) do
     case :ets.lookup(mons, nil) do
       [{nil, _, m_ref, :lock}] ->
@@ -606,28 +648,27 @@ defmodule SpaghettiPool do
     end
   end
 
-  defp add_to_read_queue(a, b, c) do
-    {:request_worker, c_ref, :read} = a
-    from = {from_pid, _} = b
-    state_data = %{read_queue: rq} = c
+  @spec add_to_read_queue(request, from, state) :: state
+  defp add_to_read_queue({:request_worker, c_ref, :read}, {from_pid, _}  = from, %{read_queue: rq} = state_data) do
     m_ref = Process.monitor(from_pid)
     rq = :queue.in({from, c_ref, m_ref}, rq)
     %{state_data | read_queue: rq}
   end
 
+  @spec add_to_write_queue(request, from, state) :: state
   defp add_to_write_queue({:request_worker, c_ref, {:write, key}}, {from_pid, _} = from, %{write_queue: wq} = state_data) do
     m_ref = Process.monitor(from_pid)
     wq = :queue.in({from, c_ref, m_ref, key}, wq)
     %{state_data | write_queue: wq}
   end
 
-  defp add_to_pending_write({_, c_ref, {:write, key}, _}, {from_pid, _} = from, %{pending_write: pw} = state_data) do
-    m_ref = Process.monitor(from_pid)
-    val = {from, c_ref, m_ref, key}
-    pw = Map.update(pw, key, :queue.from_list([val]), &:queue.in(val, &1))
+  @spec add_to_pending_write(in_queue, state) :: state
+  defp add_to_pending_write({_, _, _, key} = val, %{pending_write: pw} = state_data) do
+    pw = Map.update(pw, key, :queue.from_list([val]), fn(q) -> :queue.in(val, q) end)
     %{state_data | pending_write: pw}
   end
 
+  @spec handle_checkout(request, from, state) :: {pid, state}
   defp handle_checkout({_, c_ref, :read}, {from_pid, _}, %{workers: [pid|w]} = state_data) do
     m_ref = Process.monitor(from_pid)
     pid
@@ -639,7 +680,7 @@ defmodule SpaghettiPool do
     m_ref = Process.monitor(from_pid)
     pid
     |> add_to_monitors_table(c_ref, m_ref, state_data, key)
-    |> update_current_write
+    |> update_current_write(key)
     |> update_workers(w)
   end
 
@@ -652,9 +693,10 @@ defmodule SpaghettiPool do
     {pid, m_ref} = new_worker(sup, from_pid)
     pid
     |> add_to_monitors_table(c_ref, m_ref, state_data, key)
-    |> update_current_write
+    |> update_current_write(key)
   end
 
+  @spec add_to_monitors_table(pid | nil, reference, reference, state, key) :: {pid, state}
   defp add_to_monitors_table(pid, c_ref, m_ref, %{monitors: mons, overflow: o, workers: w} = state_data, key \\ nil) do
     true = :ets.insert(mons, {pid, c_ref, m_ref, key})
     case w do
@@ -663,10 +705,12 @@ defmodule SpaghettiPool do
     end
   end
 
-  defp update_current_write({key, %{current_write: cw} = state_data}) do
-    {key, %{state_data | current_write: MapSet.put(cw, key)}}
+  @spec update_current_write({pid, state}, key) :: {pid, state}
+  defp update_current_write({pid, %{current_write: cw} = state_data}, key) do
+    {pid, %{state_data | current_write: MapSet.put(cw, key)}}
   end
 
+  @spec handle_worker_exit(pid, state, key) :: state
   defp handle_worker_exit(pid, %{supervisor: sup, monitors: mons, overflow: o, processing_queue: q, workers: w} = state_data, nil) do
     case :queue.out(q) do
       {{:value, {from, c_ref, m_ref, key}}, waiting} ->
@@ -689,6 +733,7 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec handle_next_write(pid, state, key) :: state
   defp handle_next_write(pid, %{current_write: cw, supervisor: sup, monitors: mons, overflow: o, processing_queue: q, workers: w} = state_data, key) do
     cw = MapSet.delete(cw, key)
 
@@ -706,6 +751,7 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec handle_pending_write(:queue.queue, pid, state, key) :: state
   defp handle_pending_write(pw_queue, pid, %{supervisor: sup, monitors: mons, overflow: o, pending_write: pw, workers: w} = state_data, key) do
     case :queue.out(pw_queue) do
       {{:value, {from, c_ref, m_ref, key}}, waiting} ->
@@ -721,18 +767,22 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec all_workers_available?(state) :: boolean
   defp all_workers_available?(%{supervisor: sup, workers: w}) do
     n_workers = sup |> Supervisor.which_children |> length
     n_avail = length(w)
     n_avail == n_workers
   end
 
+  @spec pending_writes?(state, key) :: boolean
   defp pending_writes?(%{pending_write: pw}, key), do: not is_nil(pw[key])
 
-  defp update_workers({key, state_data}, workers) do
-    {key, %{state_data | workers: workers}}
+  @spec update_workers({pid, state}, list) :: {pid, state}
+  defp update_workers({pid, state_data}, workers) do
+    {pid, %{state_data | workers: workers}}
   end
 
+  @spec cancel_waiting(pid, reference, state_name, state) :: transition
   defp cancel_waiting(pid, m_ref, state_name, %{monitors: mons} = state_data) do
     Process.demonitor(m_ref, [:flush])
     true = :ets.delete(mons, pid)
@@ -740,6 +790,7 @@ defmodule SpaghettiPool do
     transition(state_name, state_data)
   end
 
+  @spec cancel_waiting(pid, reference, key, state_name, state) :: transition
   defp cancel_waiting(pid, m_ref, key, state_name, %{monitors: mons} = state_data) do
     Process.demonitor(m_ref, [:flush])
     true = :ets.delete(mons, pid)
@@ -753,6 +804,7 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec cancel_waiting(reference, state_name, state) :: transition
   defp cancel_waiting(c_ref, state_name, %{processing_queue: q} = state_data) do
     cancel = fn
       ({_, ref, m_ref, _}) when ref == c_ref ->

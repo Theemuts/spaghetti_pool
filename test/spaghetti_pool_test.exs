@@ -60,6 +60,7 @@ defmodule SpaghettiPoolTest do
   test "new writer is checked in on worker crash", %{name: name, pid: pid} do
     wid = SpaghettiPool.checkout(name, {:write, 1})
     Process.exit(wid, :kill)
+    :timer.sleep(5) # Make sure the exit is handled.
     assert is_pid(SpaghettiPool.checkout(name,  {:write, 1}))
     Supervisor.stop(pid)
   end
