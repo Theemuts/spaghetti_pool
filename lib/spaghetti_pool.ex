@@ -18,10 +18,8 @@ defmodule SpaghettiPool do
   Due to this blocking behaviour, all workers are checked out asynchronously,
   and the type (and key in case of a requested reader) must be known at
   checkout time. As a result, `checkout/3`, `transaction/4` and `checkin/3`
-  take different arguments. The return value of `status` is different as well.
+  take different arguments. The return value of `status/1` is different as well.
   See the documentation of those functions for more information.
-
-
 
   Additionally, this pool offers the functionality to lock and unlock a pool
   of workers.
@@ -37,14 +35,14 @@ defmodule SpaghettiPool do
   @type state :: map
   @type pool_opts :: Keyword.t
   @type worker_args :: any
-  @type start :: {:ok, :all_workers_available, state}
-  @type handle_next_read :: :handle_next
-  @type handle_next_write :: :handle_next| {:handle_pending, key}
-  @type in_queue :: {from, reference, reference, key}
-
   @type child_spec :: Supervisor.child_spec
-  @type silent_transition :: {:next_state, atom, map}
-  @type transition :: {:reply, any, state_name, state} | silent_transition
+
+  @typep start :: {:ok, :all_workers_available, state}
+  @typep handle_next_read :: :handle_next
+  @typep handle_next_write :: :handle_next| {:handle_pending, key}
+  @typep in_queue :: {from, reference, reference, key}
+  @typep silent_transition :: {:next_state, atom, map}
+  @typep transition :: {:reply, any, state_name, state} | silent_transition
   @typep request :: {atom, reference | pid, :read | {:write, any} | map} | {:lock, reference} | atom
   @typep from :: {pid, reference}
 
@@ -91,7 +89,7 @@ defmodule SpaghettiPool do
 
   This function expects three arguments:
     - `pool`: the name of the pool the worker belongs to.
-    - `pid`: the worker `pid`.
+    - `worker`: the worker `pid`.
     - `type`: either `:read` or `{:write, key}`.
   """
   @spec checkin(pool, worker, worker_type) :: :ok
@@ -106,6 +104,8 @@ defmodule SpaghettiPool do
     - `fun`: an anonymous function with arity 1, the argument is the worker pid.
     - `timeout`: the maximum time spent waiting for a worker, defaults to
     5000 milliseconds.
+
+  The result of the anonymous function is returned.
   """
   @spec transaction(pool, worker_type, transaction_fun, sp_timeout) :: any
   def transaction(pool, type, fun, timeout \\ @timeout) do
@@ -186,8 +186,6 @@ defmodule SpaghettiPool do
 
   If no third argument is given, the workers receive the same arguments as
   the pool.
-
-      # Example
   """
   @spec child_spec(atom, pool_opts, worker_args) :: child_spec
   def child_spec(pool_name, pool_args, worker_args) do
