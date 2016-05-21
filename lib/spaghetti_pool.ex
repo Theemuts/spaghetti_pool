@@ -270,7 +270,7 @@ defmodule SpaghettiPool do
         transition(:handle_writes, state_data)
       {{:value, {from, c_ref, _, key} = v}, queue} ->
         if MapSet.member?(cw, key) do
-          add_to_pending_write(v, state_data)
+          %{} = add_to_pending_write(v, state_data)
           handle_writes(:handle_next, state_data)
         else
           {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
@@ -422,7 +422,7 @@ defmodule SpaghettiPool do
 
   def handle_sync_event({:lock_pool, l_ref}, {from_pid, _} = from, :all_workers_available, state_data) do
     m_ref = Process.monitor(from_pid)
-    add_to_monitors_table(nil, l_ref, m_ref, state_data, :lock)
+    {_, _} = add_to_monitors_table(nil, l_ref, m_ref, state_data, :lock)
     {:reply, :ok, :locked, %{state_data | locked_by: from}}
   end
 
@@ -717,8 +717,10 @@ defmodule SpaghettiPool do
   @spec maybe_dismiss_worker(:queue.queue, state) :: state
   defp maybe_dismiss_worker(queue, %{overflow: o, workers: [_ | w] = workers} = state_data) when o > 0 do
     if :queue.len(queue) > length(workers) do
-      dismiss_worker(state_data)
-      %{state_data | workers: w}
+      case dismiss_worker(state_data) do
+        {:error, _} -> state_data
+        _ -> %{state_data | workers: w}
+      end
     else
       state_data
     end
