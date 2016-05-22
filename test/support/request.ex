@@ -18,9 +18,18 @@ defmodule SpaghettiPool.Support.Request do
     GenServer.call(pid, :return_worker)
   end
 
+  def lock(pid, pool) do
+    GenServer.cast(pid, {:lock, pool})
+  end
+
   def handle_cast({:request, pool, type}, _state) do
     wid = SpaghettiPool.checkout(pool, type)
     {:noreply, {wid, pool, type}}
+  end
+
+  def handle_cast({:lock, pool}, state) do
+    SpaghettiPool.lock(pool)
+    {:noreply, state}
   end
 
   def handle_call(:has_worker, _, wid), do: {:reply, not is_nil(wid), wid}
