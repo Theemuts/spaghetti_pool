@@ -153,6 +153,8 @@ defmodule SpaghettiPoolTest do
     assert elem(state_data.locked_by, 0) == r1
     Request.return_worker(r2)
 
+    :timer.sleep(10)
+
     {state_name, _} = SpaghettiPool.status(name)
     assert state_name == :pending_locked
 
