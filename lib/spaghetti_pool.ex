@@ -488,7 +488,7 @@ defmodule SpaghettiPool do
   ### Handle worker exit
 
   def handle_info({:"EXIT", pid, _reason}, state_name, %{supervisor: sup} =state_data) do
-    state_data = case ETS.lookup_and_demonitor(state_data, pid) do
+    state_data = case ETS.lookup_and_demonitor_worker(state_data, pid) do
       {:ok, state_data, key} ->
         handle_worker_exit(pid, state_data, key)
       {:error, %{workers: w} = state_data, true} ->
@@ -510,7 +510,6 @@ defmodule SpaghettiPool do
   @doc false
   @spec terminate(any, state_name, state) :: :ok
   def terminate(_reason, _state_name, %{workers: workers, supervisor: sup}) do
-    #IO.puts "terminate(_reason, _state_name, %{workers: workers, supervisor: sup}) "
     :ok = Enum.each(workers, fn(w) -> Process.unlink(w) end)
     true = Process.exit(sup, :shutdown)
     :ok
@@ -600,30 +599,13 @@ defmodule SpaghettiPool do
   end
 
   @spec handle_checkin(request, state) :: {key, state}
-  defp handle_checkin({:checkin_worker, pid, :read}, %{monitors: mons, workers: w} = state_data) do
-    #IO.puts "handle_checkin({:checkin_worker, pid, :read}, %{monitors: mons, workers: w} = state_data) "
-    case :ets.lookup(mons, pid) do
-      [{^pid, _, m_ref, nil}] ->
-        true = Process.demonitor(m_ref)
-        true = :ets.delete(mons, pid)
-        {nil, %{state_data | workers: [pid|w]}}
-      [] ->
-        {nil, %{state_data | workers: [pid|w]}}
-    end
+  defp handle_checkin({:checkin_worker, pid, :read}, state_data) do
+    ETS.lookup_and_demonitor(state_data, pid)
   end
 
   defp handle_checkin({:checkin_worker, pid, {:write, key}}, %{monitors: mons, workers: w, current_write: cw} = state_data) do
-    #IO.puts "handle_checkin({:checkin_worker, pid, {:write, key}}, %{monitors: mons, workers: w, current_write: cw} = state_data) "
     state_data = %{state_data | current_write: MapSet.delete(cw, key)}
-
-    case :ets.lookup(mons, pid) do
-      [{^pid, _, m_ref, ^key}] ->
-        true = Process.demonitor(m_ref)
-        true = :ets.delete(mons, pid)
-        {key, %{state_data | workers: [pid|w]}}
-      [] ->
-        {key, state_data}
-    end
+    ETS.lookup_and_demonitor(state_data, pid, key)
   end
 
   @spec handle_next_write(pid, state, key) :: state

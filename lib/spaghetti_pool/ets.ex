@@ -3,7 +3,18 @@ defmodule SpaghettiPool.ETS do
 
   def create_monitors_table, do: :ets.new(:monitors, [:private])
 
-  def lookup_and_demonitor(%{monitors: mons, workers: w} = state_data, pid) do
+  def lookup_and_demonitor(%{monitors: mons, workers: w} = state_data, pid, key \\ nil) do
+    with [{^pid, _, m_ref, key}] <- :ets.lookup(mons, pid) do
+      true = Process.demonitor(m_ref)
+      true = :ets.delete(mons, pid)
+      {key, %{state_data | workers: [pid|w]}}
+    else
+      [] ->
+        {key, %{state_data | workers: [pid|w]}}
+    end
+  end
+
+  def lookup_and_demonitor_worker(%{monitors: mons, workers: w} = state_data, pid) do
     with [{pid, _, m_ref, key}] <- :ets.lookup(mons, pid) do
       true = Process.demonitor(m_ref)
       true = :ets.delete(mons, pid)
