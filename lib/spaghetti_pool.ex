@@ -1,6 +1,7 @@
 defmodule SpaghettiPool do
   use SpaghettiPool.FSM
 
+  alias SpaghettiPool.ETS
   alias SpaghettiPool.Transition
 
   @moduledoc """
@@ -227,7 +228,7 @@ defmodule SpaghettiPool do
   def init({pool_args, worker_args}) do
     #IO.puts "init({pool_args, worker_args}) "
     Process.flag(:trap_exit, true)
-    mons = :ets.new(:monitors, [:private])
+    mons = ETS.create_monitors_table
 
     mod =          Keyword.fetch!(pool_args, :worker_module)
     size =         Keyword.get(pool_args, :size, 10)
@@ -376,20 +377,17 @@ defmodule SpaghettiPool do
 
   ### Cancel waiting
 
-  def handle_event({:cancel_waiting, c_ref, :read}, state_name, %{monitors: mons} = state_data) do
-    #IO.puts "handle_event({:cancel_waiting, c_ref, :read}, state_name, %{monitors: mons} = state_data) "
-    case :ets.match(mons, {:"$1", c_ref, :"$2", nil}) do
-      [[pid, m_ref]] -> cancel_waiting(pid, m_ref, state_name, state_data)
-      [] -> cancel_waiting(c_ref, state_name, state_data)
+  def handle_event({:cancel_waiting, c_ref, type}, state_name, state_data) do
+    {key, state_data} = case ETS.match_and_demonitor(state_data, c_ref) do
+      {:ok, state_data, pid} ->
+        handle_checkin({:checkin_worker, pid, type}, state_data)
+      {:error, state_data} when tuple_size(type) == 1 ->
+        {nil, state_data}
+      {:error, state_data} ->
+        {elem(type, 1), state_data}
     end
-  end
 
-  def handle_event({:cancel_waiting, c_ref, {:write, key}}, state_name, %{monitors: mons} = state_data) do
-    #IO.puts "handle_event({:cancel_waiting, c_ref, {:write, key}}, state_name, %{monitors: mons} = state_data) "
-    case :ets.match(mons, {:"$1", c_ref, :"$2", key}) do
-      [[pid, m_ref]] -> cancel_waiting(pid, m_ref, key, state_name, state_data)
-      [] -> cancel_waiting(c_ref, state_name, state_data)
-    end
+    Transition.transition(state_name, state_data, key)
   end
 
   ### Cancel lock
@@ -801,42 +799,4 @@ defmodule SpaghettiPool do
 
   @spec pending_writes?(state, key) :: boolean
   defp pending_writes?(%{pending_write: pw}, key), do: not is_nil(pw[key])
-
-  @spec cancel_waiting(pid, reference, state_name, state) :: transition
-  defp cancel_waiting(pid, m_ref, state_name, %{monitors: mons} = state_data) do
-    #IO.puts "cancel_waiting(pid, m_ref, state_name, %{monitors: mons} = state_data) "
-    Process.demonitor(m_ref, [:flush])
-    true = :ets.delete(mons, pid)
-    {nil, state_data} = handle_checkin({:checkin_worker, pid, :read}, state_data)
-    Transition.transition(state_name, state_data)
-  end
-
-  @spec cancel_waiting(pid, reference, key, state_name, state) :: transition
-  defp cancel_waiting(pid, m_ref, key, state_name, %{monitors: mons, current_write: cw} = state_data) do
-    #IO.puts "cancel_waiting(pid, m_ref, key, state_name, %{monitors: mons, current_write: cw} = state_data) "
-    Process.demonitor(m_ref, [:flush])
-    true = :ets.delete(mons, pid)
-    {^key, state_data} = handle_checkin({:checkin_worker, pid, {:write, key}}, state_data)
-    pending_writes = pending_writes?(state_data, key)
-
-    if pending_writes do
-      handle_writes({:handle_pending, key}, state_data)
-    else
-      Transition.transition(state_name, %{state_data | current_write: MapSet.delete(cw, key)})
-    end
-  end
-
-  @spec cancel_waiting(reference, state_name, state) :: transition
-  defp cancel_waiting(c_ref, state_name, %{processing_queue: q} = state_data) do
-    #IO.puts "cancel_waiting(c_ref, state_name, %{processing_queue: q} = state_data) "
-    cancel = fn
-      ({_, ref, m_ref, _}) when ref == c_ref ->
-        Process.demonitor(m_ref, [:flush])
-        false
-      (_) ->
-        true
-    end
-    q = :queue.filter(cancel, q)
-    Transition.transition(state_name, %{state_data | processing_queue: q})
-  end
 end
