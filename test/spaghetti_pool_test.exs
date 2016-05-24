@@ -15,6 +15,7 @@ defmodule SpaghettiPoolTest do
     {:ok, %{name: name, pid: pid}}
   end
 
+  #@tag :skip
   test "pool is initialized", %{name: name, pid: pid} do
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :all_workers_available
@@ -35,31 +36,38 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "reader can be checked out", %{name: name, pid: pid} do
     assert is_pid(SpaghettiPool.checkout(name, :read))
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_reads
+    assert state_name == :await_readers
     assert length(state_data.workers) == 9
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "reader can be checked in", %{name: name, pid: pid} do
     wid = SpaghettiPool.checkout(name, :read)
     assert SpaghettiPool.checkin(name, wid, :read) == :ok
+
+    :timer.sleep(10)
+
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :all_workers_available
     assert length(state_data.workers) == 10
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "writer can be checked out", %{name: name, pid: pid} do
     assert is_pid(SpaghettiPool.checkout(name, {:write, 1}))
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_writes
+    assert state_name == :await_writers
     assert length(state_data.workers) == 9
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "writer can be checked in", %{name: name, pid: pid} do
     wid = SpaghettiPool.checkout(name, {:write, 1})
     assert SpaghettiPool.checkin(name, wid, {:write, 1}) == :ok
@@ -69,6 +77,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "reader is checked in on client crash", %{name: name, pid: pid} do
     [r] = Util.workers(1)
     Request.request_worker(r, name, :read)
@@ -85,6 +94,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "writer is checked in on client crash", %{name: name, pid: pid} do
     [r] = Util.workers(1)
     Request.request_worker(r, name, {:write, 1})
@@ -100,6 +110,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "new reader is checked in on worker crash", %{name: name, pid: pid} do
     wid = SpaghettiPool.checkout(name, :read)
     Process.exit(wid, :kill)
@@ -112,6 +123,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "new writer is checked in on worker crash", %{name: name, pid: pid} do
     wid = SpaghettiPool.checkout(name, {:write, 1})
     Process.exit(wid, :kill)
@@ -124,6 +136,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "pool is locked immediately if no workers are checked out", %{name: name, pid: pid} do
     assert SpaghettiPool.lock(name) == :ok
 
@@ -134,6 +147,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "pool is not locked until all read workers have returned", %{name: name, pid: pid} do
     [r1, r2, r3] = r = Util.workers(3)
 
@@ -143,13 +157,14 @@ defmodule SpaghettiPoolTest do
     Request.request_worker(r3, name, :read)
 
     Request.return_worker(r1)
+    :timer.sleep(20)
+    assert Request.has_worker?(r2)
     Request.lock(r1, name)
 
-    :timer.sleep(10)
+    :timer.sleep(20)
 
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :pending_locked
-    assert Request.has_worker?(r2)
     assert elem(state_data.locked_by, 0) == r1
     Request.return_worker(r2)
 
@@ -157,8 +172,8 @@ defmodule SpaghettiPoolTest do
 
     {state_name, _} = SpaghettiPool.status(name)
     assert state_name == :pending_locked
-
     Request.return_worker(r3)
+    :timer.sleep(20)
 
     {state_name, _} = SpaghettiPool.status(name)
     assert state_name == :locked
@@ -166,6 +181,41 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid, r)
   end
 
+  #@tag :skip
+  test "pool is not locked until all workers have returned - write", %{name: name, pid: pid} do
+    [r1, r2, r3] = r = Util.workers(3)
+
+    Request.request_worker(r1, name, {:write, 1})
+    assert Request.has_worker?(r1)
+    Request.request_worker(r2, name, :read)
+    Request.request_worker(r3, name, :read)
+
+    Request.return_worker(r1)
+    :timer.sleep(20)
+    assert Request.has_worker?(r2)
+    Request.lock(r1, name)
+
+    :timer.sleep(20)
+
+    {state_name, state_data} = SpaghettiPool.status(name)
+    assert state_name == :pending_locked
+    assert elem(state_data.locked_by, 0) == r1
+    Request.return_worker(r2)
+
+    :timer.sleep(10)
+
+    {state_name, _} = SpaghettiPool.status(name)
+    assert state_name == :pending_locked
+    Request.return_worker(r3)
+    :timer.sleep(20)
+
+    {state_name, _} = SpaghettiPool.status(name)
+    assert state_name == :locked
+
+    Util.teardown(pid, r)
+  end
+
+  #@tag :skip
   test "pool is not locked until all write workers have returned", %{name: name, pid: pid} do
     [r1, r2, r3] = r = Util.workers(3)
 
@@ -196,24 +246,32 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid, r)
   end
 
+  #@tag :skip
   test "pool is not locked until all write workers have returned, pending writes are handled first", %{name: name, pid: pid} do
-    [r1, r2, r3] = r = Util.workers(3)
+    [r1, r2, r3, r4] = r = Util.workers(4)
 
     Request.request_worker(r1, name, :read)
+    assert Request.has_worker?(r1)
     Request.request_worker(r2, name, {:write, 1})
     Request.request_worker(r3, name, {:write, 1})
+    Request.request_worker(r4, name, {:write, 2})
 
-    assert Request.has_worker?(r1)
     Request.return_worker(r1)
     Request.lock(r1, name)
 
     :timer.sleep(10)
 
+    assert Request.has_worker?(r4)
+    Request.return_worker(r4)
+
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :pending_locked
+    assert :queue.len(state_data.pending_write[1]) == 1
     assert Request.has_worker?(r2)
     assert elem(state_data.locked_by, 0) == r1
     Request.return_worker(r2)
+
+    :timer.sleep(10)
 
     {state_name, _} = SpaghettiPool.status(name)
     assert state_name == :pending_locked
@@ -221,12 +279,15 @@ defmodule SpaghettiPoolTest do
     assert Request.has_worker?(r3)
     Request.return_worker(r3)
 
+    :timer.sleep(10)
+
     {state_name, _} = SpaghettiPool.status(name)
     assert state_name == :locked
 
     Util.teardown(pid, r)
   end
 
+  #@tag :skip
   test "pool can be unlocked", %{name: name, pid: pid} do
     assert SpaghettiPool.lock(name) == :ok
     assert SpaghettiPool.unlock(name) == :ok
@@ -234,6 +295,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "mode switches when all workers have been checked in", %{name: name, pid: pid} do
     [r1, r2] = r = Util.workers(2)
 
@@ -245,13 +307,13 @@ defmodule SpaghettiPoolTest do
     :timer.sleep(10) # All requests must have been processed
 
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_reads
+    assert state_name == :await_readers
     assert :queue.len(state_data.write_queue) == 1
 
     Request.return_worker(r1) # Switch to write mode
 
     {state_name, _} = SpaghettiPool.status(name)
-    assert state_name == :handle_writes
+    assert state_name == :await_writers
 
     assert Request.has_worker?(r2)
     Request.return_worker(r2)
@@ -262,6 +324,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid, r)
   end
 
+  #@tag :skip
   test "concurrent read access is allowed", %{name: name, pid: pid} do
     [r1, r2, r3] = r = Util.workers(3)
 
@@ -274,13 +337,13 @@ defmodule SpaghettiPoolTest do
     :timer.sleep(10) # All requests must have been processed
 
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_reads
+    assert state_name == :await_readers
     assert :queue.len(state_data.read_queue) == 2
 
     Request.return_worker(r1) # Start handling new reads, write queue is empty.
 
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_reads
+    assert state_name == :await_readers
     assert length(state_data.workers) == 8
 
     assert Request.has_worker?(r2)
@@ -294,6 +357,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid, r)
   end
 
+  #@tag :skip
   test "concurrent write access for different keys is allowed", %{name: name, pid: pid} do
     [r1, r2, r3] = r = Util.workers(3)
 
@@ -306,13 +370,13 @@ defmodule SpaghettiPoolTest do
     :timer.sleep(10) # All requests must have been processed
 
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_reads
+    assert state_name == :await_readers
     assert :queue.len(state_data.write_queue) == 2
 
     Request.return_worker(r1) # Switch to write mode
 
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_writes
+    assert state_name == :await_writers
     assert map_size(state_data.pending_write) == 0
     assert MapSet.member?(state_data.current_write, 1)
     assert MapSet.member?(state_data.current_write, 2)
@@ -330,6 +394,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid, r)
   end
 
+  #@tag :skip
   test "no concurrent access to the same key is allowed", %{name: name, pid: pid} do
     [r1, r2, r3] = r = Util.workers(3)
 
@@ -342,13 +407,13 @@ defmodule SpaghettiPoolTest do
     :timer.sleep(10) # All requests must have been processed
 
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_reads
+    assert state_name == :await_readers
     assert :queue.len(state_data.write_queue) == 2
 
     Request.return_worker(r1) # Switch to write mode
 
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_writes
+    assert state_name == :await_writers
     assert map_size(state_data.pending_write) == 1
     assert MapSet.member?(state_data.current_write, 1)
     assert :queue.len(state_data.pending_write[1]) == 1
@@ -357,7 +422,7 @@ defmodule SpaghettiPoolTest do
     Request.return_worker(r2)
 
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_writes
+    assert state_name == :await_writers
     assert MapSet.member?(state_data.current_write, 1)
     assert map_size(state_data.pending_write) == 1
     assert :queue.len(state_data.pending_write[1]) == 0
@@ -373,6 +438,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid, r)
   end
 
+  #@tag :skip
   test "switches to original mode if none of other in queue", %{name: name, pid: pid} do
     [r1, r2] = r = Util.workers(2)
 
@@ -384,13 +450,13 @@ defmodule SpaghettiPoolTest do
     :timer.sleep(10) # All requests must have been processed
 
     {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :handle_reads
+    assert state_name == :await_readers
     assert :queue.len(state_data.read_queue) == 1
 
     Request.return_worker(r1) # Switch to write mode
 
     {state_name, _} = SpaghettiPool.status(name)
-    assert state_name == :handle_reads
+    assert state_name == :await_readers
 
     assert Request.has_worker?(r2)
     Request.return_worker(r2)
@@ -401,6 +467,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid, r)
   end
 
+  #@tag :skip
   test "status can be retrieved", %{name: name, pid: pid} do
     status = SpaghettiPool.status(name)
     assert tuple_size(status) == 2
@@ -410,6 +477,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid)
   end
 
+  #@tag :skip
   test "new workers are created if overflow is not exceeded", %{name: name, pid: pid} do
     [r1 | workers] = r = Util.workers(12)
     Request.request_worker(r1, name, :read)
@@ -431,6 +499,7 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid, r)
   end
 
+  #@tag :skip
   test "new readers are not created if overflow is exceeded", %{name: name, pid: pid} do
     [r1, w1, w2 | workers] = r = Util.workers(22)
 
@@ -460,11 +529,13 @@ defmodule SpaghettiPoolTest do
     Util.teardown(pid, r)
   end
 
+  #@tag :skip
   test "new writers are not created if overflow is exceeded", %{name: name, pid: pid} do
     [r1, w1, w2 | workers] = r = Util.workers(22)
 
     Request.request_worker(r1, name, :read)
     assert Request.has_worker?(r1) # Always get this worker first
+
 
     w = Enum.zip([w2 | workers], 1..length([w2 | workers]))
     Enum.map(w, &Request.request_worker(elem(&1, 0), name, {:write, elem(&1, 1)}))
