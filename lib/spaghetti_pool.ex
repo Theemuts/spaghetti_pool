@@ -366,7 +366,6 @@ defmodule SpaghettiPool do
   ### Unlock pool
 
   def handle_event(:unlock_pool, _, %{mode: mode} = state_data) do
-    #IO.puts "handle_event(:unlock_pool, _, %{mode: mode} = state_data) "
     state_data = handle_unlock(state_data)
 
     case mode do
@@ -393,15 +392,7 @@ defmodule SpaghettiPool do
   ### Cancel lock
 
   def handle_event({:cancel_lock, l_ref}, _, %{mode: mode, monitors: mons} = state_data) do
-    #IO.puts "handle_event({:cancel_lock, l_ref}, _, %{mode: mode, monitors: mons} = state_data) "
-    case :ets.match(mons, {nil, l_ref, :"$1", :lock}) do
-      [[m_ref]] ->
-        Process.demonitor(m_ref, [:flush])
-        true = :ets.delete(mons, nil)
-      [] -> true
-    end
-
-    state_data = %{state_data | locked_by: nil}
+    state_data = ETS.match_and_demonitor_lock(state_data, l_ref)
 
     case mode do
       :r -> Transition.transition(:handle_reads, state_data)
@@ -486,48 +477,31 @@ defmodule SpaghettiPool do
 
   @doc false
   @spec handle_info(tuple, state_name, state) :: silent_transition
-  def handle_info({:"DOWN", mon_ref, _, _, _}, state_name, %{monitors: mons, processing_queue: w, mode: mode} = state_data) do
-    #IO.puts "handle_info({:\"DOWN\", mon_ref, _, _, _}, state_name, %{monitors: mons, processing_queue: w, mode: mode} = state_data) "
-    case :ets.match(mons, {:"$1", :"_", mon_ref, :"$2"}) do
-      [[pid, nil]] ->
-        {_, state_data} = handle_checkin({:checkin_worker, pid, :read}, state_data)
-        Transition.transition(state_name, state_data)
-      [[nil, :lock]] when state_name == :locked ->
-        # Erase the shard? This just restarts the pool.
-        raise "The locking process died. It is unsafe to continue, as the data might be inconsistent."
-      [[nil, :lock]] when state_name == :pending_locked and mode == :r->
-        Transition.transition(state_name, state_data)
-      [[pid, key]] ->
-        {_, state_data} = handle_checkin({:checkin_worker, pid, {:write, key}}, state_data)
-        Transition.transition(state_name, state_data, key)
-      [] ->
-        w = :queue.filter(fn({_, _, r, _}) -> r != mon_ref end, w)
-        Transition.transition(state_name, %{state_data | processing_queue: w})
+  def handle_info({:"DOWN", m_ref, _, _, _}, state_name, state_data) do
+    case maybe_checkin(state_name, state_data, m_ref) do
+      {:ok, state_data} -> Transition.transition(state_name, state_data)
+      {:ok, state_data, key} -> Transition.transition(state_name, state_data, key)
+      :error -> raise "The locking process died. It is unsafe to continue, as the data might be inconsistent."
     end
   end
 
   ### Handle worker exit
 
-  def handle_info({:"EXIT", pid, _reason}, state_name, %{supervisor: sup, monitors: mons, workers: workers} = state_data) do
-    #IO.puts "handle_info({:\"EXIT\", pid, _reason}, state_name, %{supervisor: sup, monitors: mons, workers: workers} = state_data) "
-    case :ets.lookup(mons, pid) do
-      [{^pid, _, mon_ref, key}] ->
-        true = Process.demonitor(mon_ref)
-        true = :ets.delete(mons, pid)
-        state_data = handle_worker_exit(pid, state_data, key)
-        Transition.transition(state_name, state_data)
-      [] ->
-        if Enum.member?(workers, pid) do
-          workers = Enum.filter(workers, &(&1 != pid))
-          Transition.transition(state_name, %{state_data | workers: [new_worker(sup) | workers]})
-        else
-          Transition.transition(state_name, state_data)
-        end
+  def handle_info({:"EXIT", pid, _reason}, state_name, %{supervisor: sup} =state_data) do
+    state_data = case ETS.lookup_and_demonitor(state_data, pid) do
+      {:ok, state_data, key} ->
+        handle_worker_exit(pid, state_data, key)
+      {:error, %{workers: w} = state_data, true} ->
+        w = Enum.filter(w, &(&1 != pid))
+        %{state_data | workers: [new_worker(sup) | w]}
+      {:error, state_data} ->
+        state_data
     end
+
+    Transition.transition(state_name, state_data)
   end
 
   def handle_info(_, state_name, state_data) do
-    #IO.puts "handle_info(_, state_name, state_data) "
     Transition.transition(state_name, state_data)
   end
 
@@ -799,4 +773,22 @@ defmodule SpaghettiPool do
 
   @spec pending_writes?(state, key) :: boolean
   defp pending_writes?(%{pending_write: pw}, key), do: not is_nil(pw[key])
+
+  defp maybe_checkin(state_name, %{processing_queue: q, mode: mode} = state_data, m_ref) do
+    case ETS.match_down(state_data, m_ref) do
+      [pid, nil] ->
+        {_, state_data} = handle_checkin({:checkin_worker, pid, :read}, state_data)
+        {:ok, state_data}
+      [pid, key] ->
+        {_, state_data} = handle_checkin({:checkin_worker, pid, {:write, key}}, state_data)
+        {:ok, state_data, key}
+      [nil, :lock] when state_name == :locked ->
+        :error
+      [nil, :lock] ->
+        {:ok, state_data}
+      nil ->
+        q = :queue.filter(fn({_, _, r, _}) -> r != m_ref end, q)
+        {:ok, %{state_data | processing_queue: q}}
+    end
+  end
 end
