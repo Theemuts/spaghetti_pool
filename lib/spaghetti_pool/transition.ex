@@ -23,6 +23,10 @@ defmodule SpaghettiPool.Transition do
   #@spec transition(SpaghettiPool.state_name, SpaghettiPool.state, boolean, boolean, boolean, boolean, boolean, :queue.queue | nil, SpaghettiPool.key) :: SpaghettiPool.transition
   defp transition(state_name, state_data, empty_processing, all_available, empty_read, empty_write, no_pending, pending_write, key)
 
+  defp transition(:request_lock, state_data, _, _, _, _, _, _, _) do
+    {:next_state, :pending_locked, state_data}
+  end
+
   defp transition(:pending_locked, %{mode: :w} = state_data, _, _, _, _, _, pw, key) when not is_nil(pw) and pw != {[], []} and not is_nil(key) do
     SpaghettiPool.finish_writes({:handle_pending, key}, state_data)
   end
@@ -33,6 +37,14 @@ defmodule SpaghettiPool.Transition do
 
   defp transition(:pending_locked, state_data, _, _, _, _, _, _, _) do
     {:next_state, :pending_locked, state_data}
+  end
+
+  defp transition(:inform_lock_success, state_data, _, _, _, _, _, _, _) do
+    {:reply, :ok, :locked, state_data}
+  end
+
+  defp transition(:inform_lock_fail, state_data, _, _, _, _, _, _, _) do
+    {:reply, :error, :locked, state_data}
   end
 
   defp transition(:locked, state_data, _, _, _, _, _, _, _) do
@@ -88,12 +100,28 @@ defmodule SpaghettiPool.Transition do
     SpaghettiPool.handle_writes({:handle_pending, k}, state_data)
   end
 
+  defp transition(:unlocked, %{mode: :w} = state_data, _, _, _, _, _, _, _) do
+    SpaghettiPool.handle_writes(:handle_next, state_data)
+  end
+
+  defp transition(:handle_writes, %{mode: :w} = state_data, _, _, _, _, _, _, _) do
+    SpaghettiPool.handle_writes(:handle_next, state_data)
+  end
+
+  defp transition(:unlocked, %{mode: :r} = state_data, _, _, _, _, _, _, _) do
+    SpaghettiPool.handle_reads(:handle_next, state_data)
+  end
+
+  defp transition(:handle_reads, %{mode: :r} = state_data, _, _, _, _, _, _, _) do
+    SpaghettiPool.handle_reads(:handle_next, state_data)
+  end
+
   # Processing queue not empty
   defp transition(_, %{workers: [], mode: :r} = state_data, _, _, _, _, _, _, _) do
     {:next_state, :await_readers, state_data}
   end
 
-  defp transition(_, %{mode: :r} = state_data, a, b, c, d, e, f, g) do
+  defp transition(_, %{mode: :r} = state_data, _, _, _, _, _, _, _) do
     SpaghettiPool.handle_reads(:handle_next, state_data)
   end
 
