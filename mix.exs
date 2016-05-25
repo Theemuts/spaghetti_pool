@@ -44,7 +44,7 @@ defmodule SpaghettiPool.Mixfile do
 
   defp package do
     [name: :spaghetti_pool,
-     files: ["lib", "mix.exs", "README*", "readme*", "LICENSE*", "license*"],
+     files: ["lib", "mix.exs", "README*", "LICENSE*"],
      maintainers: ["Thomas van Doornmalen"],
      licenses: ["MIT"],
      links: %{"GitHub" => "https://github.com/theemuts/spaghetti_pool"}]
