@@ -83,8 +83,8 @@ defmodule SpaghettiPool.Transition do
   end
 
   # Processing queue empty, all workers have returned, read queue empty, write queue not empty.
-  defp transition(:await_writers, %{read_queue: wq, mode: :w} = state_data, true, true, _, false, _, _, _) do
-    SpaghettiPool.handle_reads(:handle_next, %{state_data | processing_queue: wq, write_queue: :queue.new, mode: :w})
+  defp transition(:await_writers, %{write_queue: wq, mode: :w} = state_data, true, true, _, false, _, _, _) do
+    SpaghettiPool.handle_writes(:handle_next, %{state_data | processing_queue: wq, write_queue: :queue.new, mode: :w})
   end
 
   # No work in any queue

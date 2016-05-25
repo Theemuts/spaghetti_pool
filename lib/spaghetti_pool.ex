@@ -514,7 +514,8 @@ defmodule SpaghettiPool do
 
   @spec handle_unlock(state) :: state
   defp handle_unlock(state_data) do
-    ETS.lookup_and_demonitor(state_data, nil, :lock)
+    {:lock, state_data} = ETS.lookup_and_demonitor(state_data, nil, :lock)
+    {:lock, %{state_data | locked_by: nil}}
   end
 
   @spec handle_worker_exit(pid, state, key) :: state
