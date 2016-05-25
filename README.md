@@ -13,12 +13,16 @@ be checked out, and vice versa while handling reads.
 It is also possible to lock and unlock the pool, in order block all access to
 the table while performing maintenance tasks.
 
+## Documentation
+
+
+
 ## Installation
 
 (Note: this is package is currently under active development and not released
 on Hex yet. Step 2 does apply.)
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed as:
+This package is [available in Hex](https://hex.pm/packages/spaghetti_pool), the package can be installed as:
 
   1. Add `spaghetti_pool` to your list of dependencies in `mix.exs`:
 
