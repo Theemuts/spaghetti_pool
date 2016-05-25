@@ -51,7 +51,7 @@ defmodule SpaghettiPool.ETS do
       _ ->
         cancel = fn
           ({_, ^c_ref, m_ref, _}) ->
-            not Process.demonitor(m_ref, [:flush])
+            Process.demonitor(m_ref, [:flush]); false
           (_) ->
             true
         end

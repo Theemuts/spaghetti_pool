@@ -512,7 +512,7 @@ defmodule SpaghettiPoolTest do
 
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :all_workers_available
-    assert state_data.overflow == 1
+    assert state_data.overflow == 0
 
     Util.teardown(pid, r)
   end
@@ -523,7 +523,7 @@ defmodule SpaghettiPoolTest do
     Request.request_worker(r1, name, :read)
     assert Request.has_worker?(r1) # Always get this worker first
 
-    Enum.map([w2 | workers], &Request.request_worker(&1, name, :read))
+    Enum.map([w2|workers], &Request.request_worker(&1, name, :read))
 
     :timer.sleep(20) # Make sure next request arrives last.
 
@@ -534,14 +534,16 @@ defmodule SpaghettiPoolTest do
     {state_name, _} = SpaghettiPool.status(name)
 
     assert state_name == :await_readers
-    Request.return_worker(w2) # one worker free, assigned immediately
+    Request.return_worker(w2) # Workers are dismissed because queue too short.
+    {wa, wb} = Enum.split(workers, 10)
+    Enum.map(wa, &Request.return_worker(&1))
     assert Request.has_worker?(w1)
-    Enum.map(workers, assert &Request.return_worker(&1))
     Request.return_worker(w1)
+    Enum.map(wb, &Request.return_worker(&1))
 
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :all_workers_available
-    assert state_data.overflow == 10
+    assert state_data.overflow == 0
 
     Util.teardown(pid, r)
   end
@@ -564,14 +566,16 @@ defmodule SpaghettiPoolTest do
     {state_name, _} = SpaghettiPool.status(name)
 
     assert state_name == :await_writers
-    Request.return_worker(w2) # one worker free, assigned immediately
+    Request.return_worker(w2) # Workers are dismissed because queue too short.
+    {wa, wb} = Enum.split(workers, 10)
+    Enum.map(wa, &Request.return_worker(&1))
     assert Request.has_worker?(w1)
-    Enum.map(workers, &Request.return_worker(&1))
     Request.return_worker(w1)
+    Enum.map(wb, &Request.return_worker(&1))
 
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :all_workers_available
-    assert state_data.overflow == 10
+    assert state_data.overflow == 0
 
     Util.teardown(pid, r)
   end

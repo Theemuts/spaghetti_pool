@@ -497,10 +497,12 @@ defmodule SpaghettiPool do
   defp handle_checkin({:checkin_worker, pid, type}, state_data) do
     key = tuple_get(type, 1)
 
-    state_data
+    x = state_data
     |> maybe_remove_from_current_write(key)
     |> ETS.lookup_and_demonitor(pid, key)
     |> maybe_dismiss_worker
+
+    x
   end
 
   @spec maybe_remove_from_current_write(state, key) :: state
@@ -587,10 +589,10 @@ defmodule SpaghettiPool do
   defp maybe_dismiss_worker(x), do: x
 
   @spec dismiss_worker(state) :: state
-  defp dismiss_worker(%{supervisor: sup, workers: [pid|w]} = state_data) do
+  defp dismiss_worker(%{supervisor: sup, workers: [pid|w], overflow: o} = state_data) do
     true = Process.unlink(pid)
     Supervisor.terminate_child(sup, pid)
-    %{state_data | workers: w}
+    %{state_data | workers: w, overflow: o - 1}
   end
 
   @spec handle_down(state_name, state, reference) :: :error | {:unlock, :await_readers | :await_writers, state} | {:ok, state, key} | {:ok, state}
