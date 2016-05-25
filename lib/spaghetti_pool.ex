@@ -286,6 +286,8 @@ defmodule SpaghettiPool do
     Transition.transition(:handle_writes, state_data)
   end
 
+  @doc false
+  @spec finish_writes(handle_next_write, state) :: transition
   # Pending writes are handled before a table is locked.
   def finish_writes({:handle_pending, key}, state_data) do
     state_data = handle_pending(state_data, key)
@@ -419,7 +421,6 @@ defmodule SpaghettiPool do
   def handle_info({:"EXIT", pid, _reason}, state_name, %{supervisor: sup} =state_data) do
     state_data = case ETS.lookup_and_demonitor_worker(state_data, pid) do
       {:ok, state_data, key} -> handle_worker_exit(pid, state_data, key)
-      {:error, state_data} -> state_data
       {:error, %{workers: w} = state_data, true} ->
         w = Enum.filter(w, &(&1 != pid))
         %{state_data | workers: [new_worker(sup) | w]}
@@ -507,12 +508,13 @@ defmodule SpaghettiPool do
     |> maybe_dismiss_worker
   end
 
+  @spec maybe_remove_from_current_write(state, key) :: state
   defp maybe_remove_from_current_write(state_data, nil), do: state_data
   defp maybe_remove_from_current_write(%{current_write: cw} = state_data, key) do
     %{state_data | current_write: MapSet.delete(cw, key)}
   end
 
-  @spec handle_unlock(state) :: state
+  @spec handle_unlock(state) :: {:lock, state}
   defp handle_unlock(state_data) do
     {:lock, state_data} = ETS.lookup_and_demonitor(state_data, nil, :lock)
     {:lock, %{state_data | locked_by: nil}}
@@ -577,25 +579,26 @@ defmodule SpaghettiPool do
     {pid, %{state_data | workers: workers}}
   end
 
-  @spec maybe_dismiss_worker(state) :: state
-  defp maybe_dismiss_worker(%{overflow: o, size: s, processing_queue: q, write_queue: wq, read_queue: rq} = state_data) when o > 0 do
+  @spec maybe_dismiss_worker({key, state}) :: {key, state}
+  defp maybe_dismiss_worker({key, %{overflow: o, size: s, processing_queue: q, write_queue: wq, read_queue: rq} = state_data} = val) when o > 0 do
     max_queue_size = q
     |> :queue.len
     |> max(:queue.len(rq))
     |> max(:queue.len(wq))
 
-    if max_queue_size < o + s, do:  dismiss_worker(state_data), else: state_data
+    if max_queue_size < o + s, do:  {key, dismiss_worker(state_data)}, else: val
   end
 
   defp maybe_dismiss_worker(x), do: x
 
-  @spec dismiss_worker(state) :: Supervisor.terminate_child
+  @spec dismiss_worker(state) :: state
   defp dismiss_worker(%{supervisor: sup, workers: [pid|w]} = state_data) do
     true = Process.unlink(pid)
     Supervisor.terminate_child(sup, pid)
     %{state_data | workers: w}
   end
 
+  @spec handle_down(state_name, state, reference) :: :error | {:unlock, :await_readers | :await_writers, state} | {:ok, state, key} | {:ok, state}
   defp handle_down(state_name, %{processing_queue: q, mode: m} = state_data, m_ref) do
     case ETS.match_down(state_data, m_ref) do
       [nil, :lock] when state_name == :locked ->
@@ -607,19 +610,20 @@ defmodule SpaghettiPool do
       [pid, key] ->
         type = if is_nil(key), do: :read, else: {:write, key}
         {_, state_data} = handle_checkin({:checkin_worker, pid, type}, state_data)
-        {:ok, state_data}
-      nil ->
+        {:ok, state_data, key}
+      _ ->
         q = :queue.filter(fn({_, _, r, _}) -> r != m_ref end, q)
         {:ok, %{state_data | processing_queue: q}}
     end
   end
 
+  @spec tuple_get(any, non_neg_integer, any) :: any
   defp tuple_get(tuple, index, default \\ nil)
   defp tuple_get(tuple, index, default) when tuple_size(tuple) <= index, do: default
   defp tuple_get(tuple, index, _) when is_tuple(tuple), do: elem(tuple, index)
   defp tuple_get(_, _, default), do: default
 
-
+  @spec handle_queue({:empty, :queue.queue} | {{:value, tuple}, :queue.queue}, state) :: {:await_readers | :await_writers, state}
   defp handle_queue({:empty, _}, %{mode: :r} = state_data), do: {:await_readers, state_data}
   defp handle_queue({:empty, _}, %{mode: :w} = state_data), do: {:await_writers, state_data}
 
@@ -639,18 +643,22 @@ defmodule SpaghettiPool do
     end
   end
 
+  @spec handle_pending(state, key) :: state
   defp handle_pending(%{pending_write: pw} = state_data, key) do
     case :queue.out(pw[key]) do
       {:empty, _} ->
         %{state_data | pending_write: Map.delete(pw, key)}
-      {{:value, {from, c_ref, _, key}}, {[], []}} ->
+      {{:value, {from, c_ref, _, key}}, q} ->
+        case :queue.len(q) do
+          0 ->
+            {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
+            :gen_fsm.reply(from, pid)
+            %{state_data | pending_write: Map.delete(pw, key)}
+          _ ->
         {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
         :gen_fsm.reply(from, pid)
-        %{state_data | pending_write: Map.delete(pw, key)}
-      {{:value, {from, c_ref, _, key}}, queue} ->
-        {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
-        :gen_fsm.reply(from, pid)
-        %{state_data | pending_write: %{pw | key => queue}}
+        %{state_data | pending_write: %{pw | key => q}}
+        end
     end
   end
 end
