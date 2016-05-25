@@ -38,7 +38,7 @@ If [available in Hex](https://hex.pm/docs/publish), the package can be installed
 Below is a minimal example of how you can start using `SpaghettiPool` in your
 application:
 
-```
+```elixir
 defmodule MyApp.Mixfile do
   use Mix.Project
 
@@ -62,7 +62,7 @@ defmodule MyApp.Mixfile do
 end
 ```
 
-```
+```elixir
 defmodule MyApp do
   @moduledoc false
   use Application
@@ -104,7 +104,7 @@ defmodule MyApp do
 end
 ```
 
-```
+```elixir
 defmodule MyApp.Pool do
   @moduledoc false
 
@@ -121,7 +121,7 @@ defmodule MyApp.Pool do
 end
 ```
 
-```
+```elixir
 defmodule MyApp.Pool.Worker do
   @moduledoc false
 
