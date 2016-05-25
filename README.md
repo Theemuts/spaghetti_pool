@@ -71,12 +71,13 @@ defmodule MyApp do
   def start(_type, _args) do
     import Supervisor.Spec, warn: false
 
-    children = [
-      supervisor(MyApp.Pool, [])
-    ]
+    {:ok, _} = Application.ensure_all_started(:spaghetti_pool)
+    pool_opts = [name: {:local, MyApp.Pool}, worker_module: MyApp.Pool.Worker]
+    worker_args = :ok
 
-    opts = [strategy: :one_for_one, name: MyApp.Supervisor]
-    Supervisor.start_link(children, opts)
+    children = [SpaghettiPool.child_spec(MyApp.Pool, pool_opts, worker_args)]
+
+    Supervisor.start_link(children, [strategy: :one_for_one, name: MyApp.PoolSupervisor])
   end
 
   @doc false
@@ -100,23 +101,6 @@ defmodule MyApp do
   @doc false
   def read_something_transaction() do
     SpaghettiPool.transaction(MyApp.Pool, :read, &MyApp.Pool.Worker.do_something/1)
-  end
-end
-```
-
-```elixir
-defmodule MyApp.Pool do
-  @moduledoc false
-
-  @doc false
-  def start_link() do
-    {:ok, _} = Application.ensure_all_started(:spaghetti_pool)
-    pool_opts = [name: {:local, __MODULE__}, worker_module: MyApp.Pool.Worker]
-    worker_args = :ok
-
-    children = [SpaghettiPool.child_spec(__MODULE__, pool_opts, worker_args)]
-
-    Supervisor.start_link(children, [strategy: :one_for_one, name: MyApp.PoolSupervisor])
   end
 end
 ```
