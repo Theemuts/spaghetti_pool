@@ -31,23 +31,24 @@ defmodule SpaghettiPool.ETS do
   @doc false
   @spec lookup_and_demonitor_worker(SpaghettiPool.state, pid) :: {:ok, SpaghettiPool.state, SpaghettiPool.key} | {:error, :new_worker, boolean}
   def lookup_and_demonitor_worker(%{monitors: mons, workers: w} = state_data, pid) do
-    with [{pid, _, m_ref, key}] <- :ets.lookup(mons, pid) do
-      true = Process.demonitor(m_ref)
-      true = :ets.delete(mons, pid)
-      {:ok, state_data, key}
-    else
-      _ -> {:error, :new_worker, Enum.member?(w, pid)}
+    case :ets.lookup(mons, pid) do
+      [{pid, _, m_ref, key}] ->
+        true = Process.demonitor(m_ref)
+        true = :ets.delete(mons, pid)
+        {:ok, state_data, key}
+      _ ->
+        {:error, :new_worker, Enum.member?(w, pid)}
     end
   end
 
   @doc false
   @spec match_and_demonitor(SpaghettiPool.state, reference, SpaghettiPool.key) :: {:ok, SpaghettiPool.state, pid} | {:error, SpaghettiPool.state}
   def match_and_demonitor(%{monitors: mons, processing_queue: q} = state_data, c_ref, key \\ nil) do
-    with [[pid, m_ref]] <- :ets.match(mons, {:"$1", c_ref, :"$2", key}) do
-      Process.demonitor(m_ref, [:flush])
-      true = :ets.delete(mons, pid)
-      {:ok, state_data, pid}
-    else
+    case :ets.match(mons, {:"$1", c_ref, :"$2", key}) do
+      [[pid, m_ref]] ->
+        Process.demonitor(m_ref, [:flush])
+        true = :ets.delete(mons, pid)
+        {:ok, state_data, pid}
       _ ->
         cancel = fn
           ({_, ^c_ref, m_ref, _}) ->
