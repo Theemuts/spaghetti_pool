@@ -5,27 +5,11 @@ defmodule SpaghettiPool do
   alias SpaghettiPool.Transition
 
   @moduledoc """
-  A `:gen_fsm`-based reimplementation of `:poolboy` for concurrently read and
-  written ETS-tables.
+  A `:gen_fsm`-based worker pool. This module contains functions that help you
+  create a pool, check workers in and out, lock and unlock the pool, and to
+  retrieve its status.
 
-  If you wish to replace `poolboy` with `SpaghettiPool`, you must replace
-  calls to `:poolboy.child_spec/2` and `:poolboy.child_spec/3` with
-  `SpaghettiPool.child_spec/2` and `SpaghettiPool.child_spec/3` respectively.
-
-  The second replacement which is necessary is that `SpaghettiPool`
-  distinguishes between readers and writers. A single key cannot safely be
-  written to by two workers, but distinct keys can. Read access is assumed
-  to be safe in general, if this is not true in your use case, always use
-  write workers.
-
-  Due to this blocking behaviour, all workers are checked out asynchronously,
-  and the type (and key in case of a requested reader) must be known at
-  checkout time. As a result, `checkout/3`, `transaction/4` and `checkin/3`
-  take different arguments. The return value of `status/1` is different as well.
-  See the documentation of those functions for more information.
-
-  Additionally, this pool offers the functionality to lock and unlock a pool
-  of workers.
+  You can find an example implementation in the `README`.
   """
 
   @type pool :: atom
@@ -70,7 +54,10 @@ defmodule SpaghettiPool do
   This function returns the `pid` of your worker, or times out.
 
   Reusing checked out read workers to read multiple keys is safe, but you
-  should check out multiple write workers to handle multiple writes.
+  should check out multiple write workers to handle multiple writes, because
+  it cannot be guaranteed another worker will request a worker to write to the
+  same key.
+
   Currently, it is not possible to checkout a single worker to handle multiple
   writes, or request multiple writers with a single call to checkout.
   """
@@ -131,8 +118,11 @@ defmodule SpaghettiPool do
     - `pool`: the name of the pool the worker belongs to.
     - `timeout`: the maximum time spent awaiting the lock, defaults to
     5000 milliseconds.
+
+  This function does not return until the pool is locked. Returns `:ok` on
+  success, and `:error` if the pool is already locked.
   """
-  @spec lock(pool, sp_timeout) :: :ok
+  @spec lock(pool, sp_timeout) :: :ok | :error
   def lock(pool, timeout \\ @timeout) do
     l_ref = make_ref()
 
@@ -150,6 +140,8 @@ defmodule SpaghettiPool do
 
   This function expects one argument:
     - `pool`: the name of the pool the worker belongs to.
+
+  This function returns immediately.
   """
   @spec unlock(pool) :: :ok
   def unlock(pool) do
@@ -161,12 +153,15 @@ defmodule SpaghettiPool do
 
   This function expects one argument:
     - `pool`: the name of the pool the worker belongs to.
+
+  This function returns a tuple, containing the state name and state data of
+  the pool.
   """
   @spec status(pool) :: {state_name, state}
   def status(pool), do: :gen_fsm.sync_send_all_state_event(pool, :status)
 
   @doc """
-  Calls `:child_spec/3` with the same arguments for the pool and the worker.
+  Calls `:child_spec/3` with an empty list as worker argument.
   """
   @spec child_spec(pool, pool_opts) :: child_spec
   def child_spec(pool_name, args), do: child_spec(pool_name, args, [])

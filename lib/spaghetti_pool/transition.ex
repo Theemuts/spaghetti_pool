@@ -3,7 +3,7 @@ defmodule SpaghettiPool.Transition do
   # This module handles all state transitions that the pool can undergo.
 
   @doc false
-  #@spec transition(SpaghettiPool.state_name, SpaghettiPool.state, SpaghettiPool.key) :: SpaghettiPool.transition
+  @spec transition(SpaghettiPool.state_name, SpaghettiPool.state, SpaghettiPool.key) :: SpaghettiPool.transition
   def transition(state_name, %{processing_queue: q, write_queue: wq, read_queue: rq, pending_write: pw} = state_data, key \\ nil) do
     empty_processing = :queue.is_empty(q)
     all_available = all_workers_available?(state_data)
@@ -14,14 +14,14 @@ defmodule SpaghettiPool.Transition do
     transition(state_name, state_data, empty_processing, all_available, empty_read, empty_write, no_pending, pw[key], key)
   end
 
-  #@spec all_workers_available?(SpaghettiPool.state) :: boolean
+  @spec all_workers_available?(SpaghettiPool.state) :: boolean
   defp all_workers_available?(%{supervisor: sup, workers: w}) do
     n_workers = sup |> Supervisor.which_children |> length
     n_avail = length(w)
     n_avail == n_workers
   end
 
-  #@spec transition(SpaghettiPool.state_name, SpaghettiPool.state, boolean, boolean, boolean, boolean, boolean, :queue.queue | nil, SpaghettiPool.key) :: SpaghettiPool.transition
+  @spec transition(SpaghettiPool.state_name, SpaghettiPool.state, boolean, boolean, boolean, boolean, boolean, :queue.queue | nil, SpaghettiPool.key) :: SpaghettiPool.transition
   defp transition(state_name, state_data, empty_processing, all_available, empty_read, empty_write, no_pending, pending_write, key)
 
   defp transition(:request_lock, state_data, _, _, _, _, _, _, _) do
