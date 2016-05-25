@@ -169,7 +169,7 @@ defmodule SpaghettiPool do
   Calls `:child_spec/3` with the same arguments for the pool and the worker.
   """
   @spec child_spec(pool, pool_opts) :: child_spec
-  def child_spec(pool_name, args), do: child_spec(pool_name, args, args)
+  def child_spec(pool_name, args), do: child_spec(pool_name, args, [])
 
   @doc """
   A supervisor has children, this function generates the appropriate specifier
