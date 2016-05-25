@@ -22,6 +22,10 @@ defmodule SpaghettiPool.Support.Request do
     GenServer.cast(pid, {:lock, pool})
   end
 
+  def unlock(pid, pool) do
+    GenServer.call(pid, {:unlock, pool})
+  end
+
   def handle_cast({:request, pool, type}, _state) do
     wid = SpaghettiPool.checkout(pool, type)
     {:noreply, {wid, pool, type}}
@@ -41,5 +45,10 @@ defmodule SpaghettiPool.Support.Request do
   def handle_call(:return_worker, _, {wid, pool, type}) do
     SpaghettiPool.checkin(pool, wid, type)
     {:reply, :ok, nil}
+  end
+
+  def handle_call({:unlock, pool}, _, state) do
+    SpaghettiPool.unlock(pool)
+    {:reply, :ok, state}
   end
 end

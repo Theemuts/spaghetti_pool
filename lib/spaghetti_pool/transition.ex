@@ -1,5 +1,6 @@
 defmodule SpaghettiPool.Transition do
   @moduledoc false
+  # This module handles all state transitions that the pool can undergo.
 
   @doc false
   #@spec transition(SpaghettiPool.state_name, SpaghettiPool.state, SpaghettiPool.key) :: SpaghettiPool.transition
@@ -72,7 +73,7 @@ defmodule SpaghettiPool.Transition do
   end
 
   # Processing queue empty, not all workers have returned yet
-  defp transition(:await_writers, %{mode: w} = state_data, true, false, _, _, _, _, _) do
+  defp transition(:await_writers, state_data, true, false, _, _, _, _, _) do
     {:next_state, :await_writers, state_data}
   end
 
@@ -96,7 +97,7 @@ defmodule SpaghettiPool.Transition do
   end
 
   # Key worker was checked in, pending work is available.
-  defp transition(:await_writers, %{mode: :w} = state_data, _, _, _, _, false, q, k) when not is_nil k do
+  defp transition(:await_writers, %{mode: :w} = state_data, _, _, _, _, false, q, k) when not is_nil k and not is_nil(q) do
     SpaghettiPool.handle_writes({:handle_pending, k}, state_data)
   end
 

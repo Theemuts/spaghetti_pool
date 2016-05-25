@@ -5,7 +5,7 @@ defmodule SpaghettiPool.ETS do
 
   def insert(table, value), do: :ets.insert(table, value)
 
-  def lookup_and_demonitor(%{monitors: mons, workers: w} = state_data, pid, key \\ nil) do
+  def lookup_and_demonitor(%{monitors: mons, workers: w, strategy: s} = state_data, pid, key \\ nil) do
     case :ets.lookup(mons, pid) do
       [{nil, _, m_ref, key}] ->
         true = Process.demonitor(m_ref)
@@ -14,9 +14,11 @@ defmodule SpaghettiPool.ETS do
       [{^pid, _, m_ref, key}] ->
         true = Process.demonitor(m_ref)
         true = :ets.delete(mons, pid)
-        {key, %{state_data | workers: [pid|w]}}
+        w = if s == :lifo, do: [pid | w], else: w ++ [pid]
+        {key, %{state_data | workers: w}}
       [] ->
-        {key, %{state_data | workers: [pid|w]}}
+        w = if s == :lifo, do: [pid | w], else: w ++ [pid]
+        {key, %{state_data | workers: w}}
     end
   end
 
@@ -56,7 +58,7 @@ defmodule SpaghettiPool.ETS do
     %{state_data | locked_by: nil}
   end
 
-  def match_down(%{monitors: mons} = state_date, m_ref) do
+  def match_down(%{monitors: mons}, m_ref) do
     case :ets.match(mons, {:"$1", :"_", m_ref, :"$2"}) do
       [x] -> x
       [] -> nil
