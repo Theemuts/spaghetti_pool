@@ -1,5 +1,5 @@
 # SpaghettiPool
-A worker pool library that helps you benefit from ETS table concurrency.
+A worker pool library that helps you benefit from `ETS` table concurrency.
 
 ETS tables allow both read and write concurrency, but this comes with zero
 safety guarantees when writing to a single key concurrently. `SpaghettiPool`
@@ -15,12 +15,9 @@ the table while performing maintenance tasks.
 
 ## Documentation
 
-
+The documentation is available on [Hexdocs](https://hexdocs.pm/spaghetti_pool).
 
 ## Installation
-
-(Note: this is package is currently under active development and not released
-on Hex yet. Step 2 does apply.)
 
 This package is [available in Hex](https://hex.pm/packages/spaghetti_pool), the package can be installed as:
 
@@ -28,7 +25,7 @@ This package is [available in Hex](https://hex.pm/packages/spaghetti_pool), the 
 
     ```elixir
     def deps do
-      [{:spaghetti_pool, "~> 0.0.1"}]
+      [{:spaghetti_pool, "~> 0.1"}]
     end
     ```
 
@@ -44,6 +41,7 @@ This package is [available in Hex](https://hex.pm/packages/spaghetti_pool), the 
 
 Below is a minimal example of how you can start using `SpaghettiPool` in your
 application:
+
 
 ```elixir
 defmodule MyApp.Mixfile do
@@ -64,7 +62,7 @@ defmodule MyApp.Mixfile do
   end
 
   defp deps do
-    [{:spaghetti_pool, git: "https://github.com/theemuts/spaghetti_pool.git", branch: "master"}]
+    [{:spaghetti_pool, "~> 0.1"}]
   end
 end
 ```
@@ -140,4 +138,4 @@ end
 
 By default, this pool will have 10 workers, a maximum overflow of 10 workers,
 and these workers are assigned in a last-in-first-out manner. See the
-documentation for more information and options.
+[documentation](https://hexdocs.pm/spaghetti_pool) for more information and options.

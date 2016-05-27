@@ -38,7 +38,7 @@ defmodule SpaghettiPool.Mixfile do
 
   defp description do
     """
-    A worker pool for concurrently read and written ETS table.
+    A worker pool for concurrently read and written ETS tables.
     """
   end
 
