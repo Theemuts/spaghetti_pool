@@ -156,6 +156,7 @@ defmodule SpaghettiPoolTest do
     Request.return_worker(r1)
     :timer.sleep(20)
     assert Request.has_worker?(r2)
+    assert Request.has_worker?(r3)
     Request.lock(r1, name)
 
     :timer.sleep(20)

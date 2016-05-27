@@ -17,4 +17,5 @@ erl_crash.dump
 *.ez
 
 *.iml
+
 /.idea

@@ -101,16 +101,20 @@ defmodule SpaghettiPool.Transition do
     SpaghettiPool.handle_writes({:handle_pending, k}, state_data)
   end
 
+  defp transition(:unlocked, state_data, true, _, true, true, true, _, _) do
+    {:next_state, :all_workers_available, state_data}
+  end
+
+  defp transition(:unlocked, %{mode: :r} = state_data, _, _, _, _, _, _, _) do
+    SpaghettiPool.handle_reads(:handle_next, state_data)
+  end
+
   defp transition(:unlocked, %{mode: :w} = state_data, _, _, _, _, _, _, _) do
     SpaghettiPool.handle_writes(:handle_next, state_data)
   end
 
   defp transition(:handle_writes, %{mode: :w} = state_data, _, _, _, _, _, _, _) do
     SpaghettiPool.handle_writes(:handle_next, state_data)
-  end
-
-  defp transition(:unlocked, %{mode: :r} = state_data, _, _, _, _, _, _, _) do
-    SpaghettiPool.handle_reads(:handle_next, state_data)
   end
 
   defp transition(:handle_reads, %{mode: :r} = state_data, _, _, _, _, _, _, _) do
