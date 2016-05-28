@@ -15,25 +15,25 @@ defmodule SpaghettiPoolTest do
     {:ok, %{name: name, pid: pid}}
   end
 
-  test "pool is initialized", %{name: name, pid: pid} do
-    {state_name, state_data} = SpaghettiPool.status(name)
-    assert state_name == :all_workers_available
-    assert MapSet.equal?(state_data.current_write, MapSet.new)
-    refute state_data.locked_by
-    assert state_data.max_overflow == 10
-    assert state_data.overflow == 0
-    assert state_data.size == 10
-    assert state_data.mode == :r
-    assert state_data.monitors
-    assert map_size(state_data.pending_write) == 0
-    assert :queue.len(state_data.processing_queue) == 0
-    assert :queue.len(state_data.read_queue) == 0
-    assert :queue.len(state_data.write_queue) == 0
-    assert state_data.strategy == :lifo
-    assert length(state_data.workers) == 10
-    assert is_pid(state_data.supervisor)
-    Util.teardown(pid)
-  end
+ test "pool is initialized", %{name: name, pid: pid} do
+   {state_name, state_data} = SpaghettiPool.status(name)
+   assert state_name == :all_workers_available
+   assert MapSet.equal?(state_data.current_write, MapSet.new)
+   refute state_data.locked_by
+   assert state_data.max_overflow == 10
+   assert state_data.overflow == 0
+   assert state_data.size == 10
+   assert state_data.mode == :r
+   assert state_data.monitors
+   assert map_size(state_data.pending_write) == 0
+   assert :queue.len(state_data.processing_queue) == 0
+   assert :queue.len(state_data.read_queue) == 0
+   assert :queue.len(state_data.write_queue) == 0
+   assert state_data.strategy == :lifo
+   assert length(state_data.workers) == 10
+   assert is_pid(state_data.supervisor)
+   Util.teardown(pid)
+ end
 
   test "reader can be checked out", %{name: name, pid: pid} do
     assert is_pid(SpaghettiPool.checkout(name, :read))
@@ -107,7 +107,7 @@ defmodule SpaghettiPoolTest do
     wid = SpaghettiPool.checkout(name, :read)
     Process.exit(wid, :kill)
 
-    :timer.sleep(20) # Ensure DOWN message is received
+    :timer.sleep(20) # Ensure EXIT message is received
 
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :all_workers_available
@@ -119,7 +119,7 @@ defmodule SpaghettiPoolTest do
     wid = SpaghettiPool.checkout(name, {:write, 1})
     Process.exit(wid, :kill)
 
-    :timer.sleep(20) # Ensure DOWN message is received
+    :timer.sleep(20) # Ensure EXIT message is received
 
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :all_workers_available
@@ -418,19 +418,20 @@ defmodule SpaghettiPoolTest do
   end
 
   test "no concurrent access to the same key is allowed", %{name: name, pid: pid} do
-    [r1, r2, r3] = r = Util.workers(3)
+    [r1, r2, r3, r4] = r = Util.workers(4)
 
     Request.request_worker(r1, name, :read)
     assert Request.has_worker?(r1) # Always get this worker first
 
     Request.request_worker(r2, name, {:write, 1})
     Request.request_worker(r3, name, {:write, 1})
+    Request.request_worker(r4, name, {:write, 1})
 
     :timer.sleep(20) # All requests must have been processed
 
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :await_readers
-    assert :queue.len(state_data.write_queue) == 2
+    assert :queue.len(state_data.write_queue) == 3
 
     Request.return_worker(r1) # Switch to write mode
 
@@ -438,7 +439,7 @@ defmodule SpaghettiPoolTest do
     assert state_name == :await_writers
     assert map_size(state_data.pending_write) == 1
     assert MapSet.member?(state_data.current_write, 1)
-    assert :queue.len(state_data.pending_write[1]) == 1
+    assert :queue.len(state_data.pending_write[1]) == 2
 
     assert Request.has_worker?(r2)
     Request.return_worker(r2)
@@ -446,11 +447,21 @@ defmodule SpaghettiPoolTest do
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :await_writers
     assert MapSet.member?(state_data.current_write, 1)
-    assert map_size(state_data.pending_write) == 0
-    refute state_data.pending_write[1]
+    assert map_size(state_data.pending_write) == 1
+    assert MapSet.member?(state_data.current_write, 1)
+    assert :queue.len(state_data.pending_write[1]) == 1
 
     assert Request.has_worker?(r3)
     Request.return_worker(r3)
+
+    {state_name, state_data} = SpaghettiPool.status(name)
+    assert state_name == :await_writers
+    assert MapSet.member?(state_data.current_write, 1)
+    assert map_size(state_data.pending_write) == 0
+    refute state_data.pending_write[1]
+
+    assert Request.has_worker?(r4)
+    Request.return_worker(r4)
 
     {state_name, state_data} = SpaghettiPool.status(name)
     assert state_name == :all_workers_available

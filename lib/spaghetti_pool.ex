@@ -335,7 +335,6 @@ defmodule SpaghettiPool do
 
   def handle_event({:cancel_lock, l_ref}, _, state_data) do
     state_data = ETS.match_and_demonitor_lock(state_data, l_ref)
-    IO.inspect state_data
     Transition.transition(:unlocked, state_data)
   end
 
@@ -535,7 +534,7 @@ defmodule SpaghettiPool do
   @spec add_to_read_queue(request, from, state) :: state
   defp add_to_read_queue({:request_worker, c_ref, :read}, {from_pid, _}  = from, %{read_queue: rq} = state_data) do
     m_ref = Process.monitor(from_pid)
-    rq = :queue.in({from, c_ref, m_ref}, rq)
+    rq = :queue.in({from, c_ref, m_ref, nil}, rq)
     %{state_data | read_queue: rq}
   end
 
@@ -556,15 +555,14 @@ defmodule SpaghettiPool do
   defp add_to_monitors_table(pid, c_ref, m_ref, %{monitors: mons, overflow: o, workers: w} = state_data, key) do
     true = ETS.insert(mons, {pid, c_ref, m_ref, key})
     case w do
+      _ when key == :lock -> {pid, state_data}
       [] -> {pid, %{state_data | overflow: o + 1}}
       [_|w] -> {pid, %{state_data | workers: w}}
     end
   end
 
   @spec update_current_write({pid, state}, key) :: {pid, state}
-  defp update_current_write({pid, state_data}, nil) do
-    {pid, state_data}
-  end
+  defp update_current_write({pid, state_data}, nil), do: {pid, state_data}
 
   defp update_current_write({pid, %{current_write: cw} = state_data}, key) do
     {pid, %{state_data | current_write: MapSet.put(cw, key)}}
@@ -601,10 +599,12 @@ defmodule SpaghettiPool do
   defp handle_down(state_name, %{processing_queue: q, mode: m, write_queue: wq, read_queue: rq, pending_write: pw} = state_data, m_ref) do
     case ETS.match_down(state_data, m_ref) do
       [nil, :lock] when state_name == :locked ->
+        # NOTE: not tested
         :error
       [nil, :lock] when m == :w ->
         {:unlock, :await_writers, state_data}
-      [nil, :lock] when m == :w ->
+      [nil, :lock] when m == :r ->
+        # NOTE: not tested
         {:unlock, :await_readers, state_data}
       [pid, key] ->
         type = if is_nil(key), do: :read, else: {:write, key}
@@ -632,16 +632,18 @@ defmodule SpaghettiPool do
   defp handle_queue({:empty, _}, %{mode: :r} = state_data), do: {:await_readers, state_data}
   defp handle_queue({:empty, _}, %{mode: :w} = state_data), do: {:await_writers, state_data}
 
-  defp handle_queue({{:value, {from, c_ref, _}}, q}, %{mode: :r} = state_data) do
+  defp handle_queue({{:value, {from, c_ref, m_ref, nil}}, q}, %{mode: :r} = state_data) do
+    Process.demonitor(m_ref)
     {pid, state_data} = handle_checkout({:request_worker, c_ref, :read}, from, state_data)
     :gen_fsm.reply(from, pid)
     {:handle_reads, %{state_data | processing_queue: q}}
   end
 
-  defp handle_queue({{:value, {from, c_ref, _, key} = v}, q}, %{current_write: cw, mode: :w} = state_data) do
+  defp handle_queue({{:value, {from, c_ref, m_ref, key} = v}, q}, %{current_write: cw, mode: :w} = state_data) do
     if MapSet.member?(cw, key) do
       {:handle_writes, add_to_pending_write(v, %{state_data | processing_queue: q})}
     else
+      Process.demonitor(m_ref)
       {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
       :gen_fsm.reply(from, pid)
       {:handle_writes, %{state_data | processing_queue: q}}
@@ -652,6 +654,7 @@ defmodule SpaghettiPool do
   defp handle_pending(%{pending_write: pw} = state_data, key) do
     case :queue.out(pw[key]) do
       {:empty, _} ->
+        # NOTE: not tested. Dead code?
         %{state_data | pending_write: Map.delete(pw, key)}
       {{:value, {from, c_ref, _, key}}, q} ->
         case :queue.len(q) do
@@ -660,9 +663,9 @@ defmodule SpaghettiPool do
             :gen_fsm.reply(from, pid)
             %{state_data | pending_write: Map.delete(pw, key)}
           _ ->
-        {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
-        :gen_fsm.reply(from, pid)
-        %{state_data | pending_write: %{pw | key => q}}
+            {pid, state_data} = handle_checkout({:request_worker, c_ref, {:write, key}}, from, state_data)
+            :gen_fsm.reply(from, pid)
+            %{state_data | pending_write: %{pw | key => q}}
         end
     end
   end

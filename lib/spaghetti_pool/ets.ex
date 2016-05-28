@@ -13,12 +13,14 @@ defmodule SpaghettiPool.ETS do
   @spec lookup_and_demonitor(SpaghettiPool.state, pid | nil, SpaghettiPool.key | :lock) :: {SpaghettiPool.key, SpaghettiPool.state} | {:lock, SpaghettiPool.state}
   def lookup_and_demonitor(%{monitors: mons, workers: w, strategy: s} = state_data, pid, key \\ nil) do
     case :ets.lookup(mons, pid) do
-      [{nil, _, m_ref, key}] ->
+      [{nil, c_ref, m_ref, key}] ->
         true = Process.demonitor(m_ref)
+        true = Process.demonitor(c_ref)
         true = :ets.delete(mons, pid)
         {key, state_data}
-      [{^pid, _, m_ref, key}] ->
+      [{^pid, c_ref, m_ref, key}] ->
         true = Process.demonitor(m_ref)
+        true = Process.demonitor(c_ref)
         true = :ets.delete(mons, pid)
         w = if s == :lifo, do: [pid | w], else: w ++ [pid]
         {key, %{state_data | workers: w}}
